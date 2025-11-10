@@ -150,7 +150,7 @@ The CRSM architecture combines:
 
 1. **Token Embedding Layer**: Converts tokens to dense vectors
 2. **S4/Mamba Layers**: Efficient sequence modeling with linear complexity
-3. **State Machine**: Compressed reasoning state tracking
+3. **State Machine**: Continuous reasoning state tracking
 4. **Output Projection**: Projects hidden states to vocabulary
 
 ### Configuration
@@ -281,7 +281,7 @@ If you use CRSM in your research, please cite:
 
 ```bibtex
 @software{crsm2024,
-  title = {CRSM: Compressed Reasoning State Machine},
+  title = {CRSM: Continuous Reasoning State Machine},
   author = {Your Name},
   year = {2024},
   url = {https://github.com/pomilon/CRSM}
