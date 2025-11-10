@@ -280,10 +280,10 @@ Please submit PRs with:
 If you use CRSM in your research, please cite:
 
 ```bibtex
-@software{crsm2024,
+@software{crsm2025,
   title = {CRSM: Continuous Reasoning State Machine},
-  author = {Your Name},
-  year = {2024},
+  author = {Pomilon},
+  year = {2025},
   url = {https://github.com/pomilon/CRSM}
 }
 ```
