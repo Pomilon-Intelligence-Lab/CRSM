@@ -1,34 +1,43 @@
-"""
-Training harness for SLM PoC with checkpointing and simple CLI integration.
-Use `crsm.cli` to launch training or run `python -m crsm.train`.
-"""
 import os
 import argparse
 import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from .dataset import RandomTokenDataset, RealTextDataset, StreamingTextDataset
 from .mamba_ssm import MambaModel
 from .utils import set_seed
 
-def train_one_epoch(model, dataloader, optimizer, device, grad_accum_steps: int = 1, use_amp: bool = False):
+def train_one_epoch(model, dataloader, optimizer, device, grad_accum_steps: int = 1, 
+                   use_amp: bool = False, use_value_loss: bool = True):
+    """
+    Train for one epoch with optional value head training.
+    
+    Args:
+        use_value_loss: If True, train value head to predict future loss (CRSM mode)
+                       If False, standard LM training only
+    """
     model.train()
     total_loss = 0.0
-    criterion = nn.CrossEntropyLoss()
+    total_lm_loss = 0.0
+    total_value_loss = 0.0
+    
+    criterion = nn.CrossEntropyLoss(reduction='none')  # Changed to 'none' for per-token loss
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     step = 0
+    
     for x, y in dataloader:
         x = x.to(device)
         y = y.to(device)
+        
         if step % grad_accum_steps == 0:
             optimizer.zero_grad()
 
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
-                logits, _ = model(x)
-                b, t, v = logits.size()
-                loss = criterion(logits.reshape(b * t, v), y.reshape(b * t)) / grad_accum_steps
+                loss = compute_loss_with_value(model, x, y, criterion, use_value_loss)
+                loss = loss / grad_accum_steps
             scaler.scale(loss).backward()
             if (step + 1) % grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -36,19 +45,59 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum_steps: int 
                 scaler.step(optimizer)
                 scaler.update()
         else:
-            logits, _ = model(x)
-            b, t, v = logits.size()
-            loss = criterion(logits.reshape(b * t, v), y.reshape(b * t)) / grad_accum_steps
+            loss = compute_loss_with_value(model, x, y, criterion, use_value_loss)
+            loss = loss / grad_accum_steps
             loss.backward()
             if (step + 1) % grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
-        total_loss += (loss.item() if 'loss' in locals() else 0.0) * grad_accum_steps
+        total_loss += loss.item() * grad_accum_steps
         step += 1
 
     avg_loss = total_loss / max(1, step)
     return avg_loss
+
+
+def compute_loss_with_value(model, x, y, criterion, use_value_loss=True):
+    """
+    Compute combined LM loss and value loss.
+    
+    The value head is trained to predict the average next-token loss,
+    which serves as a proxy for "how good is this state".
+    """
+    # Get predictions with value head
+    if use_value_loss:
+        logits, value, _ = model.predict_policy_value(x, states=None)
+    else:
+        logits, _ = model(x, states=None)
+        value = None
+    
+    b, t, v = logits.size()
+    
+    # Standard language modeling loss
+    lm_loss_per_token = criterion(logits.reshape(b * t, v), y.reshape(b * t))
+    lm_loss = lm_loss_per_token.mean()
+    
+    # Value loss: train value head to predict average future loss
+    if use_value_loss and value is not None:
+        # Compute per-sequence average loss as target for value head
+        with torch.no_grad():
+            # Average loss per sequence (batch,)
+            target_value = lm_loss_per_token.view(b, t).mean(dim=1)
+            # Negative because lower loss = higher value
+            target_value = -target_value
+        
+        # Value is (batch,) from last token
+        value_loss = F.mse_loss(value, target_value)
+        
+        # Combined loss with value weight
+        total_loss = lm_loss + 0.1 * value_loss
+    else:
+        total_loss = lm_loss
+    
+    return total_loss
+
 
 def save_checkpoint(model, optimizer, epoch, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -57,6 +106,7 @@ def save_checkpoint(model, optimizer, epoch, path):
         'model_state': model.state_dict(),
         'optim_state': optimizer.state_dict()
     }, path)
+
 
 def main(
     epochs: int = 1,
@@ -77,6 +127,7 @@ def main(
     resume: str | None = None,
     distributed: bool = False,
     local_rank: int | None = None,
+    use_value_loss: bool = True,  # NEW: Enable value head training
 ):
     set_seed(seed)
 
@@ -155,6 +206,7 @@ def main(
                     'batch_size': batch_size,
                     'lr': lr,
                     'seq_len': seq_len,
+                    'use_value_loss': use_value_loss,  # Log this
                 })
             except Exception:
                 wandb_enabled = False
@@ -167,7 +219,11 @@ def main(
         if distributed and 'sampler' in locals() and hasattr(dl.sampler, 'set_epoch'):
             dl.sampler.set_epoch(epoch)
 
-        loss = train_one_epoch(model, dl, optimizer, device, grad_accum_steps=grad_accum_steps, use_amp=use_amp)
+        # MODIFIED: Pass use_value_loss flag
+        loss = train_one_epoch(model, dl, optimizer, device, 
+                              grad_accum_steps=grad_accum_steps, 
+                              use_amp=use_amp,
+                              use_value_loss=use_value_loss)
 
         try:
             scheduler.step()
@@ -184,7 +240,8 @@ def main(
         is_rank0 = (rank == 0)
 
         if is_rank0:
-            print(f"Epoch {epoch}/{epochs} loss={loss:.4f}")
+            mode = "with value loss" if use_value_loss else "LM only"
+            print(f"Epoch {epoch}/{epochs} loss={loss:.4f} ({mode})")
             if wandb_enabled:
                 try:
                     wandb.log({'epoch': epoch, 'loss': loss})
@@ -214,6 +271,7 @@ def main(
         except Exception:
             pass
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=1)
@@ -225,6 +283,10 @@ if __name__ == '__main__':
     parser.add_argument('--data-dir', type=str, default=None, help='Path to text files directory')
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints')
     parser.add_argument('--device', type=str, default=None, help='CUDA device or cpu')
+    parser.add_argument('--no-value-loss', action='store_true', help='Disable value head training (standard LM only)')
     args = parser.parse_args()
-    main(epochs=args.epochs, batch_size=args.batch_size, vocab_size=args.vocab_size, seq_len=args.seq_len,
-         lr=args.lr, seed=args.seed, data_dir=args.data_dir, checkpoint_dir=args.checkpoint_dir, device_str=args.device)
+    
+    main(epochs=args.epochs, batch_size=args.batch_size, vocab_size=args.vocab_size, 
+         seq_len=args.seq_len, lr=args.lr, seed=args.seed, data_dir=args.data_dir, 
+         checkpoint_dir=args.checkpoint_dir, device_str=args.device,
+         use_value_loss=(not args.no_value_loss))

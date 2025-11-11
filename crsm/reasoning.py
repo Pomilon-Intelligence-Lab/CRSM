@@ -211,8 +211,127 @@ class AsyncDeliberationLoop:
         visit_counts = [root.children[a].visit_count for a in actions]
         best = actions[visit_counts.index(max(visit_counts))]
 
-        # For now we don't propose a state delta; return None for state_delta.
-        return int(best), None
+        delta = self._compute_delta_from_mcts(root, best)
+        return int(best), delta
+    
+    def _compute_delta_from_mcts(self, root: MCTSNode, best_action: int) -> Optional[List[torch.Tensor]]:
+        """
+        Compute state delta based on MCTS statistics.
+        
+        The delta represents how planning suggests the latent state should be adjusted
+        based on the tree search. We weight child state differences by visit counts
+        to capture which trajectories the search found most promising.
+        
+        Args:
+            root: The MCTS root node
+            best_action: The selected action
+            
+        Returns:
+            List of per-layer state deltas, or None if not applicable
+        """
+        if best_action not in root.children:
+            return None
+        
+        best_child = root.children[best_action]
+        
+        # Only compute deltas for list-based states (per-layer SSM states)
+        if not isinstance(root.state, list) or not isinstance(best_child.state, list):
+            return None
+        
+        # Can't compute delta if structures don't match
+        if len(root.state) != len(best_child.state):
+            return None
+        
+        try:
+            deltas = []
+            # Weight by how much the search explored this path
+            # Higher visit count = more confident in this direction
+            weight = min(1.0, best_child.visit_count / (root.visit_count + 1e-8))
+            
+            for parent_layer_state, child_layer_state in zip(root.state, best_child.state):
+                # Skip if either is None
+                if parent_layer_state is None or child_layer_state is None:
+                    deltas.append(None)
+                    continue
+                
+                # Ensure both are tensors
+                if not isinstance(parent_layer_state, torch.Tensor) or not isinstance(child_layer_state, torch.Tensor):
+                    deltas.append(None)
+                    continue
+                
+                # Compute weighted difference
+                # This represents "planning suggests moving the state in this direction"
+                delta = (child_layer_state - parent_layer_state) * weight
+                
+                # Scale down to prevent large jumps (conservative update)
+                delta = delta * 0.1
+                
+                deltas.append(delta)
+            
+            return deltas
+        
+        except Exception as e:
+            # If anything fails, return None (no delta applied)
+            return None
+
+
+    def _aggregate_mcts_statistics(self, root: MCTSNode) -> Optional[List[torch.Tensor]]:
+        """
+        Alternative delta computation: aggregate information from all visited nodes.
+        
+        This is more sophisticated - instead of just using the best child, we create
+        a delta that incorporates information from the entire search tree.
+        
+        You can use this instead of _compute_delta_from_mcts for potentially better results.
+        """
+        if not isinstance(root.state, list):
+            return None
+        
+        if not root.children:
+            return None
+        
+        try:
+            # Collect all children states weighted by visit counts
+            total_visits = sum(child.visit_count for child in root.children.values())
+            
+            if total_visits == 0:
+                return None
+            
+            # Initialize accumulated deltas
+            num_layers = len(root.state)
+            accumulated_deltas = [None] * num_layers
+            
+            for action, child in root.children.items():
+                if not isinstance(child.state, list) or len(child.state) != num_layers:
+                    continue
+                
+                # Weight by visit count (exploration weight)
+                weight = child.visit_count / total_visits
+                
+                # Also weight by value (exploitation weight)
+                value_weight = max(0, child.value) if child.visit_count > 0 else 0
+                combined_weight = weight * (1 + value_weight)
+                
+                for i, (parent_s, child_s) in enumerate(zip(root.state, child.state)):
+                    if parent_s is None or child_s is None:
+                        continue
+                    if not isinstance(parent_s, torch.Tensor) or not isinstance(child_s, torch.Tensor):
+                        continue
+                    
+                    delta = (child_s - parent_s) * combined_weight
+                    
+                    if accumulated_deltas[i] is None:
+                        accumulated_deltas[i] = delta
+                    else:
+                        accumulated_deltas[i] = accumulated_deltas[i] + delta
+            
+            # Scale down for conservative updates
+            accumulated_deltas = [d * 0.05 if d is not None else None for d in accumulated_deltas]
+            
+            return accumulated_deltas
+        
+        except Exception:
+            return None
 
     async def deliberate(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor]]:
         """Async wrapper that runs the synchronous deliberation off the event loop.

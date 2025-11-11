@@ -84,11 +84,17 @@ class MambaModel(nn.Module):
         This attempts to call each layer's SSM init_state if available. If not,
         it falls back to a zero tensor with the block's d_model dimension when
         possible, otherwise None.
+        
+        Args:
+            batch_size: Batch size for states
+            device: Device to create states on
+            
         Returns:
             list: new_states per layer (length == num_layers)
         """
         device = device or next(self.parameters()).device
         states = []
+        
         for layer in self.layers:
             ssm = layer.ssm
             # prefer an SSM-provided initializer
@@ -104,7 +110,9 @@ class MambaModel(nn.Module):
                 else:
                     st = None
             states.append(st)
+        
         return states
+
 
     def step(self, x, states=None):
         """Single-step update: run the model on a single token (or short chunk)
@@ -124,11 +132,13 @@ class MambaModel(nn.Module):
         logits, new_states = self.forward(x_in, states)
         return logits, new_states
 
+
     def predict_policy_value(self, x, states=None):
         """Return policy logits and a scalar value estimate for the input sequence.
 
         Args:
             x: token ids tensor (batch, seq_len)
+            states: optional list of previous states
         Returns:
             logits: (batch, seq_len, vocab)
             value: (batch,) scalar value estimates (from last token)
@@ -148,6 +158,7 @@ class MambaModel(nn.Module):
         last_hidden = h[:, -1, :]
         value = self.value_head(last_hidden).squeeze(-1)
         return logits, value, new_states
+
 
     def predict_from_states(self, states):
         """Predict policy logits and value directly from per-layer latent states.

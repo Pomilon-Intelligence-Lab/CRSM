@@ -25,6 +25,7 @@ def main():
     train_p.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     train_p.add_argument('--distributed', action='store_true', help='Enable single-node multi-GPU distributed training (torchrun/local_rank)')
     train_p.add_argument('--local-rank', type=int, default=None, help='Local rank supplied by launcher (torchrun)')
+    train_p.add_argument('--no-value-loss', action='store_true', help='Disable value head training')
 
     args = parser.parse_args()
     if args.cmd == 'train':
@@ -33,7 +34,7 @@ def main():
                    checkpoint_dir=args.checkpoint_dir, device_str=args.device,
                    wandb_enabled=(not args.no_wandb), wandb_project=args.wandb_project,
                    grad_accum_steps=args.grad_accum, use_amp=args.amp, num_workers=args.num_workers,
-                   resume=args.resume, distributed=args.distributed, local_rank=args.local_rank)
+                   resume=args.resume, distributed=args.distributed, local_rank=args.local_rank, use_value_loss=(not args.no_value_loss))
     else:
         parser.print_help()
 
