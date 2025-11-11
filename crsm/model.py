@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import asyncio
 import os
+import json
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 
@@ -72,7 +73,8 @@ class CRSMModel(nn.Module):
     @classmethod
     def from_pretrained(cls, path: str) -> 'CRSMModel':
         """Load from pretrained checkpoint"""
-        config_dict = torch.load(f"{path}/config.json")
+        with open(f"{path}/config.json", 'r') as f:
+            config_dict = json.load(f)
         config = CRSMConfig.from_dict(config_dict)
         model = cls(config)
         model.load_state_dict(torch.load(f"{path}/pytorch_model.bin"))
@@ -81,7 +83,8 @@ class CRSMModel(nn.Module):
     def save_pretrained(self, path: str):
         """Save model and config"""
         os.makedirs(path, exist_ok=True)
-        torch.save(self.config.to_dict(), f"{path}/config.json")
+        with open(f"{path}/config.json", 'w') as f:
+            json.dump(self.config.to_dict(), f, indent=2)
         torch.save(self.state_dict(), f"{path}/pytorch_model.bin")
 
 class CRSM(nn.Module):
@@ -128,10 +131,14 @@ class CRSM(nn.Module):
         
         self.autonomous_mode = autonomous_mode
         self._thinking_task = None
-        # Background suggestion task used during generation
+        # Background suggestion infrastructure
         self._bg_task = None
-        self._bg_suggestion = None
-        self._bg_lock = None  # created lazily in async context
+        # create queue and lock eagerly to avoid races
+        self._bg_queue = asyncio.Queue(maxsize=8)
+
+        # Canonical latent state and lock for concurrency
+        self.latent_state = None
+        self._state_lock = asyncio.Lock()
         
     def forward(self, 
                 x: torch.Tensor, 
@@ -146,6 +153,34 @@ class CRSM(nn.Module):
             new_states: Updated states
         """
         return self.backbone(x, states)
+
+    def init_latent_state(self, batch_size: int = 1, device: Optional[torch.device] = None):
+        """Initialize the canonical latent state for the model."""
+        device = device or next(self.parameters()).device
+        self.latent_state = self.backbone.init_state(batch_size=batch_size, device=device)
+        return self.latent_state
+
+    def apply_state_delta(self, delta):
+        """Apply a state delta produced by the deliberator to the canonical latent_state.
+
+        The delta format is expected to match the structure of latent_state (e.g., list of tensors).
+        Currently supports elementwise addition for lists of tensors. If delta is None, no-op.
+        """
+        if delta is None or self.latent_state is None:
+            return
+        # Simple elementwise addition for list-like states
+        try:
+            if isinstance(self.latent_state, list) and isinstance(delta, list):
+                for i in range(min(len(self.latent_state), len(delta))):
+                    if self.latent_state[i] is None or delta[i] is None:
+                        continue
+                    self.latent_state[i] = self.latent_state[i] + delta[i]
+            else:
+                # If single tensor style
+                self.latent_state = self.latent_state + delta
+        except Exception:
+            # If incompatible shapes, ignore delta to avoid crashes
+            return
     
     async def think_and_generate(self, 
                                prompt: torch.Tensor,
@@ -162,13 +197,35 @@ class CRSM(nn.Module):
         states = None
         # Background worker that continuously updates a suggested token
         async def _bg_worker():
-            if self._bg_lock is None:
-                self._bg_lock = asyncio.Lock()
+            # create queue and lock if needed
+            if self._bg_queue is None:
+                self._bg_queue = asyncio.Queue(maxsize=8)
+            if self._state_lock is None:
+                self._state_lock = asyncio.Lock()
+
             try:
                 while True:
-                    suggestion = await self.reasoning.deliberate(current_sequence.clone())
-                    async with self._bg_lock:
-                        self._bg_suggestion = suggestion
+                    # take a consistent snapshot of sequence + state
+                    async with self._state_lock:
+                        seq_copy = current_sequence.clone()
+                        state_copy = None
+                        if self.latent_state is not None:
+                            # shallow clone; may be list of tensors
+                            try:
+                                state_copy = [s.clone() if s is not None else None for s in self.latent_state]
+                            except Exception:
+                                state_copy = self.latent_state
+
+                    # run deliberation (runs off event loop inside reasoning.deliberate)
+                    suggestion, delta = await self.reasoning.deliberate(seq_copy, state_copy)
+
+                    # try to enqueue suggestion non-blocking
+                    try:
+                        self._bg_queue.put_nowait((suggestion, delta))
+                    except asyncio.QueueFull:
+                        # drop suggestion when queue is full to avoid blocking
+                        pass
+
                     # small pause to yield
                     await asyncio.sleep(0.01)
             except asyncio.CancelledError:
@@ -181,18 +238,37 @@ class CRSM(nn.Module):
             # Get current logits and states (keeps states for warm start)
             logits, states = self.forward(current_sequence, states)
 
+            # Update canonical latent_state with the new per-layer states
+            if states is not None:
+                # clone states to avoid aliasing
+                try:
+                    async with self._state_lock:
+                        self.latent_state = [s.clone() if s is not None else None for s in states]
+                except Exception:
+                    # best-effort: assign directly if cloning fails
+                    async with self._state_lock:
+                        self.latent_state = states
+
             # Try to use background suggestion if available
+            next_token = None
+            delta = None
             suggestion = None
-            if self._bg_lock is not None:
-                async with self._bg_lock:
-                    suggestion = self._bg_suggestion
-                    self._bg_suggestion = None
+            if self._bg_queue is not None:
+                try:
+                    suggestion, delta = self._bg_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    suggestion = None
 
             if suggestion is None:
-                # fallback to synchronous deliberation
-                next_token = await self.reasoning.deliberate(current_sequence)
-            else:
-                next_token = int(suggestion)
+                # fallback to direct deliberation (will run in thread)
+                suggestion, delta = await self.reasoning.deliberate(current_sequence, self.latent_state)
+
+            next_token = int(suggestion)
+
+            # apply any proposed state delta
+            if delta is not None:
+                async with self._state_lock:
+                    self.apply_state_delta(delta)
 
             # Append token and continue (preserve batch dim)
             token_tensor = torch.tensor([[next_token]], device=prompt.device, dtype=prompt.dtype)
@@ -206,6 +282,9 @@ class CRSM(nn.Module):
             except asyncio.CancelledError:
                 pass
             self._bg_task = None
+        # clear queue
+        if self._bg_queue is not None:
+            self._bg_queue = None
 
         # Return as 1-D sequence (remove batch dim)
         return current_sequence.squeeze(0)
@@ -222,9 +301,25 @@ class CRSM(nn.Module):
     async def _autonomous_loop(self):
         """Internal autonomous thinking loop"""
         while self.autonomous_mode:
-            # Run continuous reasoning without explicit prompts
-            current_state = torch.zeros(1, 1, device=next(self.parameters()).device)
-            await self.reasoning.deliberate(current_state)
+            # Ensure latent state exists
+            if self.latent_state is None:
+                self.init_latent_state(device=next(self.parameters()).device)
+
+            # run deliberation on latent state snapshot and apply any delta
+            if self._state_lock is None:
+                self._state_lock = asyncio.Lock()
+
+            async with self._state_lock:
+                try:
+                    state_copy = [s.clone() if s is not None else None for s in self.latent_state]
+                except Exception:
+                    state_copy = self.latent_state
+
+            suggestion, delta = await self.reasoning.deliberate(None, state_copy)
+            if delta is not None:
+                async with self._state_lock:
+                    self.apply_state_delta(delta)
+
             await asyncio.sleep(0.1)  # Prevent CPU overload
             
     def stop_autonomous_thinking(self):

@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from typing import Optional
 from .s4_adapter import get_ssm_block_factory
 from .s4_vendor import S4LiteBlock
 
@@ -77,7 +78,53 @@ class MambaModel(nn.Module):
         
         return logits, new_states
 
-    def predict_policy_value(self, x):
+    def init_state(self, batch_size: int = 1, device: Optional[torch.device] = None):
+        """Initialize a list of per-layer states for the SSM blocks.
+
+        This attempts to call each layer's SSM init_state if available. If not,
+        it falls back to a zero tensor with the block's d_model dimension when
+        possible, otherwise None.
+        Returns:
+            list: new_states per layer (length == num_layers)
+        """
+        device = device or next(self.parameters()).device
+        states = []
+        for layer in self.layers:
+            ssm = layer.ssm
+            # prefer an SSM-provided initializer
+            if hasattr(ssm, 'init_state'):
+                try:
+                    st = ssm.init_state(batch_size=batch_size, device=device)
+                except Exception:
+                    st = None
+            else:
+                # fallback to zeros if the block exposes d_model
+                if hasattr(ssm, 'd_model'):
+                    st = torch.zeros(batch_size, ssm.d_model, device=device)
+                else:
+                    st = None
+            states.append(st)
+        return states
+
+    def step(self, x, states=None):
+        """Single-step update: run the model on a single token (or short chunk)
+
+        Args:
+            x: token ids tensor with shape (batch,) or (batch, 1) or (batch, seq_len)
+            states: optional list of previous states
+        Returns:
+            logits: (batch, seq_len, vocab) or (batch, 1, vocab)
+            new_states: list of new states per layer
+        """
+        # reuse forward implementation by ensuring seq dim
+        if x.dim() == 1:
+            x_in = x.unsqueeze(1)
+        else:
+            x_in = x
+        logits, new_states = self.forward(x_in, states)
+        return logits, new_states
+
+    def predict_policy_value(self, x, states=None):
         """Return policy logits and a scalar value estimate for the input sequence.
 
         Args:
@@ -88,7 +135,8 @@ class MambaModel(nn.Module):
             new_states: list of states per layer
         """
         h = self.embedding(x)
-        states = [None] * len(self.layers)
+        if states is None:
+            states = [None] * len(self.layers)
         new_states = []
         for layer, state in zip(self.layers, states):
             h, new_state = layer(h, state)
@@ -100,3 +148,71 @@ class MambaModel(nn.Module):
         last_hidden = h[:, -1, :]
         value = self.value_head(last_hidden).squeeze(-1)
         return logits, value, new_states
+
+    def predict_from_states(self, states):
+        """Predict policy logits and value directly from per-layer latent states.
+
+        Args:
+            states: list of per-layer state tensors or a single tensor.
+        Returns:
+            logits: (batch, 1, vocab)
+            value: (batch,) scalar estimates
+            new_states: None (not applicable)
+        """
+        device = next(self.parameters()).device
+        d_model = self.output.in_features
+
+        if states is None:
+            h = torch.zeros((1, d_model), device=device)
+        elif isinstance(states, list):
+            tensors = [s for s in states if isinstance(s, torch.Tensor) and s.numel() > 0]
+            if not tensors:
+                h = torch.zeros((1, d_model), device=device)
+            else:
+                # ensure batch dim
+                normed = []
+                for s in tensors:
+                    if s.dim() == 1:
+                        s = s.unsqueeze(0)
+                    normed.append(s)
+                # align dims if necessary by slicing or padding (best-effort)
+                batch = normed[0].shape[0]
+                aligned = []
+                for s in normed:
+                    if s.shape[0] != batch:
+                        # try to expand or repeat
+                        try:
+                            s = s.expand(batch, -1)
+                        except Exception:
+                            s = s.repeat(batch, 1)
+                    if s.shape[1] != d_model:
+                        # slice or pad with zeros
+                        if s.shape[1] > d_model:
+                            s = s[:, :d_model]
+                        else:
+                            pad = torch.zeros((batch, d_model - s.shape[1]), device=device)
+                            s = torch.cat([s, pad], dim=1)
+                    aligned.append(s)
+                h = sum(aligned) / len(aligned)
+        elif isinstance(states, torch.Tensor):
+            s = states
+            if s.dim() == 1:
+                s = s.unsqueeze(0)
+            if s.shape[1] != d_model:
+                if s.shape[1] > d_model:
+                    s = s[:, :d_model]
+                else:
+                    pad = torch.zeros((s.shape[0], d_model - s.shape[1]), device=device)
+                    s = torch.cat([s, pad], dim=1)
+            h = s
+        else:
+            # unknown type
+            h = torch.zeros((1, d_model), device=device)
+
+        # convert to (batch, seq=1, d_model) so we can reuse norm/output heads
+        h_seq = h.unsqueeze(1)
+        h_seq = self.norm(h_seq)
+        logits = self.output(h_seq)
+        last_hidden = h_seq[:, -1, :]
+        value = self.value_head(last_hidden).squeeze(-1)
+        return logits, value, None
