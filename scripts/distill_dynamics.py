@@ -1,20 +1,3 @@
-"""
-Distill dynamics model from the backbone SSM.
-
-This script trains the LatentDynamics module (f_θ) to predict state transitions
-by imitating the backbone's SSM forward passes:
-
-    f_θ(h_t, a) ≈ h_{t+1} - h_t
-
-where h_t is the per-layer state and a is an action (token).
-
-Usage:
-    python scripts/distill_dynamics.py --model-path checkpoints/base_model.pt \
-                                       --output-path checkpoints/dynamics.pt \
-                                       --num-samples 10000 \
-                                       --epochs 5
-"""
-
 import argparse
 import torch
 import torch.nn as nn
@@ -22,6 +5,7 @@ import torch.optim as optim
 from pathlib import Path
 import json
 from tqdm import tqdm
+from typing import List, Tuple, Any
 
 import sys
 sys.path.insert(0, '.')
@@ -29,257 +13,207 @@ sys.path.insert(0, '.')
 from crsm.mamba_ssm import MambaModel
 from crsm.latent_dynamics import LatentDynamics
 from crsm.utils import set_seed
+from crsm.tokenizer import Tokenizer
+# We'll import the training function from the dedicated file
+from crsm.latent_train import train as train_dynamics_model, ShardedDynamicsDataset, collate_dynamics_batch
 
-
-def collect_transitions(backbone, num_samples, vocab_size, device):
+# --- Distillation Logic (Collect Transitions) ---
+def collect_transitions(backbone, traces_path, output_dir, num_samples, vocab_size, device) -> Path:
     """
-    Collect (state, action, next_state) tuples by running the backbone.
+    Collect (state_t, action_emb, state_delta) tuples by running the backbone on a real dataset.
+    The collected data is saved to a temp directory and the path is returned.
+    """
+    if not Path(traces_path).exists():
+        raise FileNotFoundError(f"Traces file not found at: {traces_path}. Cannot distill dynamics.")
+
+    temp_shards_dir = Path(output_dir) / 'dynamics_temp_shards'
+    temp_shards_dir.mkdir(parents=True, exist_ok=True)
     
-    Args:
-        backbone: Trained MambaModel
-        num_samples: Number of transitions to collect
-        vocab_size: Vocabulary size
-        device: Device to run on
-        
-    Returns:
-        List of (state, action, next_state) tuples
-    """
-    print(f"Collecting {num_samples} state transitions...")
+    print(f"Collecting {num_samples} state transitions from {traces_path}...")
     backbone.eval()
     
-    transitions = []
-    batch_size = 32
-    num_batches = (num_samples + batch_size - 1) // batch_size
+    # FIX from previous step: Remove vocab_size as Tokenizer does not accept it.
+    tokenizer = Tokenizer() 
     
-    with torch.no_grad():
-        for _ in tqdm(range(num_batches), desc="Collecting"):
-            # Initialize random states for this batch
-            states = backbone.init_state(batch_size=batch_size, device=device)
-            
-            # Sample random actions
-            actions = torch.randint(0, vocab_size, (batch_size,), device=device)
-            
-            # Get next states from backbone
-            _, next_states = backbone.step(actions.unsqueeze(1), states)
-            
-            # Store transitions for each item in batch
-            for b in range(batch_size):
-                if len(transitions) >= num_samples:
-                    break
-                
-                # Extract per-layer states for this batch item
-                state_b = [s[b:b+1] if s is not None else None for s in states]
-                next_state_b = [s[b:b+1] if s is not None else None for s in next_states]
-                action_b = actions[b].item()
-                
-                transitions.append((state_b, action_b, next_state_b))
-            
-            if len(transitions) >= num_samples:
+    current_shard_size = 0
+    max_shard_size = 1000  # Save to new file every 1000 transitions
+    shard_idx = 0
+    shard_data = []
+    total_transitions = 0
+
+    def save_shard():
+        nonlocal shard_idx, shard_data
+        if not shard_data: return
+        shard_path = temp_shards_dir / f'transitions_shard_{shard_idx:05d}.jsonl'
+        with shard_path.open('w', encoding='utf-8') as f:
+            for entry in shard_data:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        shard_idx += 1
+        shard_data = []
+
+    with Path(traces_path).open('r', encoding='utf-8') as f:
+        for line in tqdm(f, desc="Distilling Data"):
+            if total_transitions >= num_samples:
                 break
+                
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            prompt = obj.get('prompt', '')
+            trace = obj.get('trace', '')
+            input_text = (prompt + '\n' + trace).strip()
+            
+            token_ids = tokenizer.encode(input_text)
+            
+            # Skip short sequences
+            if len(token_ids) < 2: continue
+            
+            # Initialize state (list of per-layer tensors)
+            # FIX from previous step: Explicitly set batch_size=1
+            state = backbone.init_state(batch_size=1, device=device)
+            
+            # Process one token at a time to capture transitions
+            for t in range(len(token_ids) - 1):
+                if total_transitions >= num_samples:
+                    break
+                    
+                # 1. State before the action (h_t)
+                # FIX: Squeeze the batch dimension (which is 1) before converting to list.
+                # This ensures a 1D list is saved, which becomes a 2D tensor [B, D] after batching, 
+                # resolving the 'got 3 and 2' RuntimeError.
+                state_t_list = [s.squeeze(0).clone().detach().cpu().numpy().tolist() for s in state if s is not None]
+
+                # 2. Action (token_t) and its embedding (e_a)
+                token_t = torch.tensor([[token_ids[t]]], dtype=torch.long, device=device)
+                
+                # Get action embedding from backbone's embedding layer
+                action_emb_tensor = backbone.embedding(token_t).squeeze(0).squeeze(0).detach().cpu()
+                
+                # 3. Predict the next state (h_{t+1})
+                with torch.no_grad():
+                    _, next_state = backbone.step(token_t, state)
+                
+                # 4. Calculate the Delta (h_{t+1} - h_t)
+                state_delta_list = []
+                for layer_idx, s_curr in enumerate(state):
+                    if s_curr is not None:
+                         s_next = next_state[layer_idx]
+                         # Must squeeze here too to match state_t dimension
+                         delta = (s_next.clone().detach() - s_curr.clone().detach()).squeeze(0).cpu().numpy().tolist()
+                         state_delta_list.append(delta)
+                    
+                if len(state_t_list) > 0:
+                    # For a single-layer dynamics model, we just use the first layer's state
+                    shard_data.append({
+                        'state_t': state_t_list[0], 
+                        'action_emb': action_emb_tensor.numpy().tolist(), 
+                        'state_delta': state_delta_list[0]
+                    })
+                    total_transitions += 1
+                    current_shard_size += 1
+                    
+                    if current_shard_size >= max_shard_size:
+                        save_shard()
+                        current_shard_size = 0
+                
+                # Update state for next iteration
+                state = next_state
+            
+    # Save the last shard
+    save_shard()
     
-    print(f"Collected {len(transitions)} transitions")
-    return transitions[:num_samples]
+    print(f"\n✓ Collected {total_transitions} real transitions into {shard_idx} shards.")
+    return temp_shards_dir
 
 
-def train_dynamics(dynamics, backbone, transitions, epochs, lr, device):
-    """
-    Train the dynamics model to predict state transitions.
-    
-    Args:
-        dynamics: LatentDynamics module
-        backbone: MambaModel (for action embeddings)
-        transitions: List of (state, action, next_state) tuples
-        epochs: Number of training epochs
-        lr: Learning rate
-        device: Device to train on
-    """
-    optimizer = optim.Adam(dynamics.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-    
-    # Split into train/val
-    split_idx = int(0.9 * len(transitions))
-    train_data = transitions[:split_idx]
-    val_data = transitions[split_idx:]
-    
-    print(f"\nTraining dynamics model:")
-    print(f"  Train samples: {len(train_data)}")
-    print(f"  Val samples: {len(val_data)}")
-    print(f"  Epochs: {epochs}")
-    print(f"  Learning rate: {lr}")
-    
-    best_val_loss = float('inf')
-    
-    for epoch in range(epochs):
-        # Training
-        dynamics.train()
-        train_loss = 0.0
-        num_layers_trained = 0
-        
-        for state, action, next_state in tqdm(train_data, desc=f"Epoch {epoch+1}/{epochs}"):
-            # Get action embedding
-            action_tensor = torch.tensor([[action]], device=device)
-            with torch.no_grad():
-                action_emb = backbone.embedding(action_tensor).squeeze(1)  # (1, d_model)
-            
-            optimizer.zero_grad()
-            layer_losses = []
-            
-            # Train on each layer
-            for layer_idx, (s_curr, s_next) in enumerate(zip(state, next_state)):
-                if s_curr is None or s_next is None:
-                    continue
-                
-                s_curr = s_curr.to(device)
-                s_next = s_next.to(device)
-                
-                # Predict delta
-                pred_delta = dynamics(s_curr, action_emb)
-                
-                # Target delta
-                target_delta = s_next - s_curr
-                
-                # Loss
-                loss = criterion(pred_delta, target_delta)
-                layer_losses.append(loss)
-                num_layers_trained += 1
-            
-            if layer_losses:
-                total_loss = sum(layer_losses) / len(layer_losses)
-                total_loss.backward()
-                optimizer.step()
-                train_loss += total_loss.item()
-        
-        avg_train_loss = train_loss / len(train_data)
-        
-        # Validation
-        dynamics.eval()
-        val_loss = 0.0
-        
-        with torch.no_grad():
-            for state, action, next_state in val_data:
-                action_tensor = torch.tensor([[action]], device=device)
-                action_emb = backbone.embedding(action_tensor).squeeze(1)
-                
-                layer_losses = []
-                for s_curr, s_next in zip(state, next_state):
-                    if s_curr is None or s_next is None:
-                        continue
-                    
-                    s_curr = s_curr.to(device)
-                    s_next = s_next.to(device)
-                    
-                    pred_delta = dynamics(s_curr, action_emb)
-                    target_delta = s_next - s_curr
-                    
-                    loss = criterion(pred_delta, target_delta)
-                    layer_losses.append(loss)
-                
-                if layer_losses:
-                    val_loss += sum(layer_losses).item() / len(layer_losses)
-        
-        avg_val_loss = val_loss / len(val_data)
-        
-        print(f"Epoch {epoch+1}: train_loss={avg_train_loss:.6f}, val_loss={avg_val_loss:.6f}")
-        
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            print(f"  → New best validation loss: {best_val_loss:.6f}")
-    
-    return best_val_loss
-
+# --- Modified Main function (to use the new collector and separate trainer) ---
 
 def main():
-    parser = argparse.ArgumentParser(description="Distill dynamics model from backbone")
-    parser.add_argument('--model-path', type=str, required=True,
-                       help='Path to trained backbone checkpoint')
-    parser.add_argument('--output-path', type=str, default='checkpoints/dynamics.pt',
-                       help='Where to save trained dynamics model')
-    parser.add_argument('--num-samples', type=int, default=10000,
-                       help='Number of state transitions to collect')
-    parser.add_argument('--epochs', type=int, default=5,
-                       help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                       help='Learning rate')
-    parser.add_argument('--vocab-size', type=int, default=1000,
-                       help='Vocabulary size')
-    parser.add_argument('--d-model', type=int, default=128,
-                       help='Model dimension')
-    parser.add_argument('--num-layers', type=int, default=2,
-                       help='Number of layers')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed')
-    parser.add_argument('--device', type=str, default=None,
-                       help='Device (cuda/cpu)')
-    
+    parser = argparse.ArgumentParser(description="Distill and train Latent Dynamics Model")
+    parser.add_argument('--model-path', required=True, help="Path to the trained Mamba backbone checkpoint.")
+    parser.add_argument('--output-path', required=True, help="Path to save the trained dynamics model.")
+    parser.add_argument('--traces-path', required=True, help="Path to the real data (JSONL traces) for distillation.")
+    parser.add_argument('--num-samples', type=int, default=5000, help="Number of state transitions to collect.")
+    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    # Add optional overrides for model params not in checkpoint metadata
+    parser.add_argument('--d-model', type=int, default=128)
+    parser.add_argument('--vocab-size', type=int, default=1000)
+    parser.add_argument('--num-layers', type=int, default=2)
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--device', type=str, default=None)
     args = parser.parse_args()
     
-    set_seed(args.seed)
+    set_seed(42)
     device = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-    print(f"Using device: {device}")
     
-    # Load backbone
-    print(f"\nLoading backbone from {args.model_path}...")
-    backbone = MambaModel(
-        vocab_size=args.vocab_size,
-        d_model=args.d_model,
-        d_state=64,
-        d_ffn=512,
-        num_layers=args.num_layers
-    ).to(device)
-    
-    if Path(args.model_path).exists():
-        checkpoint = torch.load(args.model_path, map_location=device)
-        if 'model_state' in checkpoint:
-            backbone.load_state_dict(checkpoint['model_state'])
-        else:
-            backbone.load_state_dict(checkpoint)
-        print("✓ Loaded backbone weights")
+    # --- Load Config and Model ---
+    loaded_checkpoint = torch.load(args.model_path, map_location='cpu')
+    if isinstance(loaded_checkpoint, dict) and 'model_state' in loaded_checkpoint:
+        state_dict = loaded_checkpoint['model_state']
     else:
-        print("⚠ Checkpoint not found, using randomly initialized backbone")
+        state_dict = loaded_checkpoint
+        
+    model_params = {}
+    # Extract d_model and vocab_size from state_dict for proper model sizing
+    for k, v in state_dict.items():
+        if k == 'embedding.weight':
+             model_params['vocab_size'] = v.size(0)
+             model_params['d_model'] = v.size(1)
+             break
+
+    d_model = model_params.get('d_model', args.d_model)
+    vocab_size = model_params.get('vocab_size', args.vocab_size)
+    num_layers = args.num_layers 
     
-    # Create dynamics model
-    dynamics = LatentDynamics(d_model=args.d_model).to(device)
-    print(f"\nDynamics model parameters: {sum(p.numel() for p in dynamics.parameters()):,}")
-    
-    # Collect transitions
-    transitions = collect_transitions(
+    backbone = MambaModel(
+        vocab_size=vocab_size, 
+        d_model=d_model, 
+        d_state=args.d_model // 2, 
+        d_ffn=d_model * 4, 
+        num_layers=num_layers
+    ).to(device)
+
+    # FIX from previous step: Load the state dict directly into the MambaModel instance
+    try:
+        backbone.load_state_dict(state_dict, strict=True)
+        print("Loaded MambaModel state dictionary successfully (strict=True).")
+    except RuntimeError as e:
+        print(f"Warning: Failed to load state dictionary with strict=True. Trying strict=False. Error: {e}")
+        backbone.load_state_dict(state_dict, strict=False)
+
+    print(f"Loaded backbone from {args.model_path} (d_model={d_model}, layers={num_layers}).")
+
+    # --- Step 1: Collect Transitions (The Distillation) ---
+    temp_shards_dir = collect_transitions(
         backbone, 
+        args.traces_path,
+        Path(args.output_path).parent,
         args.num_samples, 
-        args.vocab_size, 
+        vocab_size, 
         device
     )
     
-    # Train dynamics
-    best_loss = train_dynamics(
-        dynamics,
-        backbone,
-        transitions,
-        args.epochs,
-        args.lr,
-        device
+    # --- Step 2: Train Dynamics (Calling the other script's logic) ---
+    print("\n" + "="*60)
+    print("STEP 2: Training Dynamics Model (MSE Loss)")
+    print("="*60)
+
+    # Calling the training logic from crsm/latent_train.py
+    best_loss = train_dynamics_model(
+        shards_dir=str(temp_shards_dir),
+        d_model=d_model, 
+        epochs=args.epochs, 
+        batch_size=args.batch_size, 
+        lr=args.lr, 
+        device=str(device),
+        output_path=args.output_path
     )
-    
-    # Save dynamics model
-    output_path = Path(args.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    torch.save({
-        'dynamics_state': dynamics.state_dict(),
-        'config': {
-            'd_model': args.d_model,
-            'vocab_size': args.vocab_size,
-            'num_layers': args.num_layers,
-        },
-        'best_val_loss': best_loss,
-        'num_samples': args.num_samples,
-    }, output_path)
-    
-    print(f"\n✓ Saved dynamics model to {output_path}")
-    print(f"  Best validation loss: {best_loss:.6f}")
     
     # Save metadata
-    meta_path = output_path.parent / (output_path.stem + '_meta.json')
+    meta_path = Path(args.output_path).parent / (Path(args.output_path).stem + '_meta.json')
     with open(meta_path, 'w') as f:
         json.dump({
             'model_path': str(args.model_path),
@@ -287,13 +221,14 @@ def main():
             'num_samples': args.num_samples,
             'epochs': args.epochs,
             'lr': args.lr,
-            'best_val_loss': best_loss,
-            'd_model': args.d_model,
-            'vocab_size': args.vocab_size,
-            'num_layers': args.num_layers,
+            'd_model': d_model,
+            'vocab_size': vocab_size,
+            'num_layers': num_layers,
+            'best_val_loss': best_loss
         }, f, indent=2)
     
-    print(f"✓ Saved metadata to {meta_path}")
+    print(f"\n✓ Saved dynamics model to {args.output_path}")
+    print(f"  Best validation loss: {best_loss:.6f}")
 
 
 if __name__ == '__main__':

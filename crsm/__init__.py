@@ -11,5 +11,6 @@ __all__ = [
     'MambaBlock',
     'S4LiteBlock',
     'AsyncDeliberationLoop',
-    'MCTSNode'
+    'MCTSNode',
+    'LatentDynamics'
 ]

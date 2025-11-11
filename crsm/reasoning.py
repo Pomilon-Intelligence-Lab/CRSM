@@ -44,6 +44,8 @@ class AsyncDeliberationLoop:
         self.top_k = 16
         # rollout depth when leaf has no value
         self.rollout_depth = 5
+        # Dynamics model for fast state transitions during MCTS
+        self.dynamics_model = None
         
     def select_action(self, node: MCTSNode) -> Tuple[MCTSNode, List[int]]:
         """Select the most promising action using PUCT algorithm"""
@@ -94,34 +96,56 @@ class AsyncDeliberationLoop:
                 
     def _get_next_state(self, state, action: int):
         """Simulate next state given current state and action.
-
-        If `state` is a list of per-layer SSM states, call the backbone `step`
-        with the action token to obtain the new per-layer states. If `state`
-        is a token sequence tensor, append the action to the sequence.
+        
+        Prioritizes the lightweight LatentDynamics model for fast MCTS rollouts.
         """
-        # latent per-layer state (list) -> use backbone.step to simulate transition
-        if isinstance(state, list):
-            device = next(self.model.parameters()).device
-            
-            # Check if model has learned dynamics
-            if hasattr(self.model, 'dynamics'):
-                # Use learned dynamics instead of SSM forward
-                token_emb = self.model.embedding(torch.tensor([[action]], device=device))
-                action_emb = token_emb.squeeze(1)  # (batch, d_model)
+        device = next(self.model.parameters()).device
+
+        # --- CRSM FAST DYNAMICS MODEL STEP (HIGH PRIORITY) ---
+        # Check for the lightweight dynamics model, which is attached to the reasoning loop
+        if isinstance(state, list) and hasattr(self, 'dynamics_model') and self.dynamics_model is not None:
+            try:
+                # 1. Get action embedding from the main model's embedding layer
+                token = torch.tensor([[action]], dtype=torch.long, device=device)
                 
-                new_states = []
+                # CRSM (self.model) is the wrapper; action embedding must come from the backbone.
+                if hasattr(self.model, 'backbone') and hasattr(self.model.backbone, 'embedding'):
+                     # token -> (1, 1, d_model) -> squeeze to (d_model,)
+                     action_emb = self.model.backbone.embedding(token).squeeze(0).squeeze(0)
+                else:
+                    # Fallback if the embedding is directly on the model
+                    action_emb = self.model.embedding(token).squeeze(0).squeeze(0)
+
+            except Exception as e:
+                # If we fail to get the embedding (e.g., structure mismatch), fall through to the slow SSM step
+                pass 
+            else:
+                # Execute FAST dynamics prediction
+                next_states = []
                 for layer_state in state:
                     if layer_state is None:
-                        new_states.append(None)
-                    else:
-                        delta = self.model.dynamics(layer_state, action_emb)
-                        new_states.append(layer_state + delta)
-                return new_states
-            else:
-                # Fallback to SSM forward pass
-                token = torch.tensor([[action]], dtype=torch.long, device=device)
-                _, new_states = self.model.step(token, state)
-                return new_states
+                        next_states.append(None)
+                        continue
+                    
+                    # Ensure state input is correctly shaped (d_model) for dynamics model
+                    s_input = layer_state.squeeze(0)
+                    
+                    # Predict state delta using the lightweight Dynamics Model
+                    delta = self.dynamics_model(s_input, action_emb)
+                    
+                    # Apply delta (update rule) and keep the batch dimension
+                    next_layer_state = layer_state + delta.unsqueeze(0)
+                    next_states.append(next_layer_state)
+                
+                return next_states
+
+        # --- SLOW FALLBACK: Original Mamba step (for MCTS verification/initialization or if dynamics fails) ---
+        if isinstance(state, list):
+            # latent per-layer state (list) -> use model.step (SLOW)
+            token = torch.tensor([[action]], dtype=torch.long, device=device)
+            # model.step returns (logits, new_states).
+            _, new_states = self.model.step(token, state)
+            return new_states
 
         # token sequence -> append action token
         if isinstance(state, torch.Tensor):
@@ -132,7 +156,7 @@ class AsyncDeliberationLoop:
             return torch.cat([state, torch.tensor([action], device=state.device)])
         except Exception:
             # as a last resort return the action as a tensor
-            return torch.tensor([action], device=next(self.model.parameters()).device)
+            return torch.tensor([action], device=device)
     
     def backpropagate(self, node: MCTSNode, value: float, path: List[int]):
         """Update statistics of visited nodes in the path"""
