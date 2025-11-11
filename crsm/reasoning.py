@@ -102,10 +102,26 @@ class AsyncDeliberationLoop:
         # latent per-layer state (list) -> use backbone.step to simulate transition
         if isinstance(state, list):
             device = next(self.model.parameters()).device
-            token = torch.tensor([[action]], dtype=torch.long, device=device)
-            # model.step returns (logits, new_states)
-            _, new_states = self.model.step(token, state)
-            return new_states
+            
+            # Check if model has learned dynamics
+            if hasattr(self.model, 'dynamics'):
+                # Use learned dynamics instead of SSM forward
+                token_emb = self.model.embedding(torch.tensor([[action]], device=device))
+                action_emb = token_emb.squeeze(1)  # (batch, d_model)
+                
+                new_states = []
+                for layer_state in state:
+                    if layer_state is None:
+                        new_states.append(None)
+                    else:
+                        delta = self.model.dynamics(layer_state, action_emb)
+                        new_states.append(layer_state + delta)
+                return new_states
+            else:
+                # Fallback to SSM forward pass
+                token = torch.tensor([[action]], dtype=torch.long, device=device)
+                _, new_states = self.model.step(token, state)
+                return new_states
 
         # token sequence -> append action token
         if isinstance(state, torch.Tensor):

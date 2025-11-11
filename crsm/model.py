@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from .mamba_ssm import MambaModel
 from .reasoning import AsyncDeliberationLoop
+from .latent_dynamics import LatentDynamics
 
 @dataclass
 class CRSMConfig:
@@ -128,6 +129,8 @@ class CRSM(nn.Module):
             c_puct=c_puct,
             n_simulations=n_simulations
         )
+        
+        self.dynamics = LatentDynamics(d_model=d_model)
         
         self.autonomous_mode = autonomous_mode
         self._thinking_task = None

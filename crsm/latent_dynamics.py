@@ -2,7 +2,11 @@ import torch
 from torch import nn
 
 class LatentDynamics(nn.Module):
-    def __init__(self, d_model, action_dim):
+    def __init__(self, d_model, action_dim=None):
+        super().__init__() 
+        # If action_dim not provided, use d_model (embed actions same as states)
+        if action_dim is None:
+            action_dim = d_model
         self.net = nn.Sequential(
             nn.Linear(d_model + action_dim, d_model * 2),
             nn.GELU(),
