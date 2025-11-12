@@ -138,7 +138,7 @@ def create_crsm_with_dynamics(config, output_dir) -> Optional[Path]:
     print(f"Loading backbone from {latest_ckpt}...")
     backbone_state = torch.load(latest_ckpt, map_location=device)
     # NOTE: Assuming backbone save format is {'model_state': ...}
-    crsm.backbone.load_state_dict(backbone_state['model_state'])
+    crsm.backbone.load_state_dict(backbone_state['model_state_dict'])
     print("✓ Loaded backbone weights")
 
     # Load dynamics (from dynamics.pt created in Step 2)

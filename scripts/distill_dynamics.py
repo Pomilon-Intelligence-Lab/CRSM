@@ -151,8 +151,8 @@ def main():
     
     # --- Load Config and Model ---
     loaded_checkpoint = torch.load(args.model_path, map_location='cpu')
-    if isinstance(loaded_checkpoint, dict) and 'model_state' in loaded_checkpoint:
-        state_dict = loaded_checkpoint['model_state']
+    if isinstance(loaded_checkpoint, dict) and 'model_state_dict' in loaded_checkpoint:
+        state_dict = loaded_checkpoint['model_state_dict']
     else:
         state_dict = loaded_checkpoint
         

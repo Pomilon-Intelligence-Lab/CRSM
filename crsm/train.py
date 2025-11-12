@@ -103,8 +103,8 @@ def save_checkpoint(model, optimizer, epoch, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
         'epoch': epoch,
-        'model_state': model.state_dict(),
-        'optim_state': optimizer.state_dict()
+        'model_state_dict': model.state_dict(),  # Changed from 'model_state'
+        'optimizer_state_dict': optimizer.state_dict()  # Changed from 'optim_state'
     }, path)
 
 
@@ -127,7 +127,8 @@ def main(
     resume: str | None = None,
     distributed: bool = False,
     local_rank: int | None = None,
-    use_value_loss: bool = True,  # NEW: Enable value head training
+    use_value_loss: bool = True,
+    hf_tokenizer_name: str | None = None,  # NEW: Add tokenizer parameter
 ):
     set_seed(seed)
 
@@ -152,7 +153,19 @@ def main(
         device = torch.device(device_str if device_str else ('cuda' if torch.cuda.is_available() else 'cpu'))
 
     if data_dir:
-        ds = StreamingTextDataset(data_dir=data_dir, seq_len=seq_len)
+        # FIXED: Pass vocab_size and hf_tokenizer_name to dataset
+        if hf_tokenizer_name:
+            ds = StreamingTextDataset(
+                data_dir=data_dir, 
+                seq_len=seq_len, 
+                hf_tokenizer_name=hf_tokenizer_name
+            )
+        else:
+            ds = StreamingTextDataset(
+                data_dir=data_dir, 
+                seq_len=seq_len, 
+                vocab_size=vocab_size
+            )
         collate_fn = None
         shuffle = False
     else:
@@ -182,16 +195,64 @@ def main(
 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
 
-    # resume
+    # resume logic (unchanged)
     if resume is not None and os.path.exists(resume):
+        print(f"\n{'='*60}")
+        print(f"Resuming from checkpoint: {resume}")
+        print('='*60)
+        
         ckpt = torch.load(resume, map_location=device)
+        
         try:
-            model.load_state_dict(ckpt['model_state'])
-            optimizer.load_state_dict(ckpt['optim_state'])
+            # Extract state dict from various formats
+            if 'model_state_dict' in ckpt:
+                state_dict = ckpt['model_state_dict']
+                print("Format: New (model_state_dict)")
+            elif 'model_state' in ckpt:
+                state_dict = ckpt['model_state']
+                print("Format: Old (model_state)")
+            else:
+                state_dict = ckpt
+                print("Format: Raw state_dict")
+            
+            # Handle CRSM checkpoint (strip 'backbone.' prefix)
+            if any(k.startswith('backbone.') for k in state_dict.keys()):
+                print("→ Detected CRSM checkpoint, extracting backbone weights...")
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith('backbone.'):
+                        new_state_dict[k.replace('backbone.', '', 1)] = v
+                    elif not k.startswith(('dynamics.', 'reasoning.')):
+                        new_state_dict[k] = v
+                state_dict = new_state_dict
+                print(f"→ Extracted {len(state_dict)} parameters")
+            
+            # Load model weights
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"⚠ Missing keys: {len(missing)} (this is OK if fine-tuning)")
+            if unexpected:
+                print(f"⚠ Unexpected keys: {len(unexpected)} (ignored)")
+            
+            # Load optimizer if available
+            opt_loaded = False
+            if 'optimizer_state_dict' in ckpt and ckpt['optimizer_state_dict'] is not None:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                opt_loaded = True
+            elif 'optim_state' in ckpt:
+                optimizer.load_state_dict(ckpt['optim_state'])
+                opt_loaded = True
+            
+            if opt_loaded:
+                print("✓ Loaded optimizer state")
+            
             start_epoch = ckpt.get('epoch', 0) + 1
-            print(f"Resumed from checkpoint {resume}, starting at epoch {start_epoch}")
-        except Exception:
-            print('Failed to load checkpoint states; continuing from scratch')
+            print(f"✓ Successfully resumed from epoch {start_epoch}")
+            
+        except Exception as e:
+            print(f'✗ Failed to load checkpoint: {type(e).__name__}')
+            print(f'   {e}')
+            print('\n⚠ Continuing from scratch')
             start_epoch = 1
     else:
         start_epoch = 1
@@ -206,7 +267,7 @@ def main(
                     'batch_size': batch_size,
                     'lr': lr,
                     'seq_len': seq_len,
-                    'use_value_loss': use_value_loss,  # Log this
+                    'use_value_loss': use_value_loss,
                 })
             except Exception:
                 wandb_enabled = False
@@ -219,7 +280,6 @@ def main(
         if distributed and 'sampler' in locals() and hasattr(dl.sampler, 'set_epoch'):
             dl.sampler.set_epoch(epoch)
 
-        # MODIFIED: Pass use_value_loss flag
         loss = train_one_epoch(model, dl, optimizer, device, 
                               grad_accum_steps=grad_accum_steps, 
                               use_amp=use_amp,
@@ -270,7 +330,6 @@ def main(
             torch.distributed.destroy_process_group()
         except Exception:
             pass
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

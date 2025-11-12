@@ -5,6 +5,7 @@ This module integrates the Mamba SSM backbone with the asynchronous MCTS deliber
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import asyncio
 import os
 import json
@@ -29,6 +30,9 @@ class CRSMConfig:
     c_puct: float = 1.0
     n_simulations: int = 50
     autonomous_mode: bool = False
+    temperature: float = 0.8  # NEW: Sampling temperature
+    top_k: int = 50  # NEW: Top-k sampling
+    top_p: float = 0.95  # NEW: Nucleus sampling
     
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'CRSMConfig':
@@ -46,7 +50,10 @@ class CRSMConfig:
             'dropout': self.dropout,
             'c_puct': self.c_puct,
             'n_simulations': self.n_simulations,
-            'autonomous_mode': self.autonomous_mode
+            'autonomous_mode': self.autonomous_mode,
+            'temperature': self.temperature,
+            'top_k': self.top_k,
+            'top_p': self.top_p,
         }
 
 class CRSMModel(nn.Module):
@@ -63,8 +70,15 @@ class CRSMModel(nn.Module):
             dropout=config.dropout,
             c_puct=config.c_puct,
             n_simulations=config.n_simulations,
-            autonomous_mode=config.autonomous_mode
+            autonomous_mode=config.autonomous_mode,
+            temperature=config.temperature,
+            top_k=config.top_k,
+            top_p=config.top_p,
         )
+
+    def load_dynamics(self, dynamics_path: str):
+        """Load trained dynamics model."""
+        self.crsm.load_dynamics(dynamics_path)
         
     def forward(self, input_ids, attention_mask=None, states=None):
         # Forward pass with optional states
@@ -98,7 +112,10 @@ class CRSM(nn.Module):
                  dropout: float = 0.1,
                  c_puct: float = 1.0,
                  n_simulations: int = 50,
-                 autonomous_mode: bool = False):
+                 autonomous_mode: bool = False,
+                 temperature: float = 0.8,
+                 top_k: int = 50,
+                 top_p: float = 0.95):
         """
         Args:
             vocab_size: Size of the vocabulary
@@ -110,6 +127,9 @@ class CRSM(nn.Module):
             c_puct: Exploration constant for MCTS
             n_simulations: Number of MCTS simulations per deliberation
             autonomous_mode: Whether to enable autonomous operation
+            temperature: Sampling temperature for generation
+            top_k: Top-k sampling parameter
+            top_p: Nucleus sampling parameter
         """
         super().__init__()
         
@@ -123,6 +143,9 @@ class CRSM(nn.Module):
             dropout=dropout
         )
         
+        # Dynamics model
+        self.dynamics = LatentDynamics(d_model=d_model)
+        
         # Reasoning module
         self.reasoning = AsyncDeliberationLoop(
             mamba_model=self.backbone,
@@ -130,7 +153,15 @@ class CRSM(nn.Module):
             n_simulations=n_simulations
         )
         
-        self.dynamics = LatentDynamics(d_model=d_model)
+        # Connect dynamics to reasoning
+        self.reasoning.dynamics_model = self.dynamics
+        self.reasoning.temperature = temperature
+        self.reasoning.use_sampling = True
+        
+        # Sampling parameters
+        self.temperature = temperature
+        self.top_k = top_k
+        self.top_p = top_p
         
         self.autonomous_mode = autonomous_mode
         self._thinking_task = None
@@ -142,6 +173,26 @@ class CRSM(nn.Module):
         # Canonical latent state and lock for concurrency
         self.latent_state = None
         self._state_lock = asyncio.Lock()
+    
+    def load_dynamics(self, dynamics_path: str):
+        """Load trained dynamics model."""
+        device = next(self.parameters()).device
+        ckpt = torch.load(dynamics_path, map_location=device)
+        
+        if 'dynamics_state' in ckpt:
+            self.dynamics.load_state_dict(ckpt['dynamics_state'])
+            print(f"✓ Loaded dynamics from {dynamics_path}")
+        elif isinstance(ckpt, dict) and all(k.startswith('net.') for k in ckpt.keys()):
+            self.dynamics.load_state_dict(ckpt)
+            print(f"✓ Loaded dynamics from {dynamics_path}")
+        else:
+            print(f"⚠ Warning: Could not load dynamics from {dynamics_path}")
+            return False
+        
+        # Update reasoning module reference
+        self.reasoning.dynamics_model = self.dynamics
+        print("✓ Connected dynamics to reasoning module")
+        return True
         
     def forward(self, 
                 x: torch.Tensor, 
@@ -164,14 +215,9 @@ class CRSM(nn.Module):
         return self.latent_state
 
     def apply_state_delta(self, delta):
-        """Apply a state delta produced by the deliberator to the canonical latent_state.
-
-        The delta format is expected to match the structure of latent_state (e.g., list of tensors).
-        Currently supports elementwise addition for lists of tensors. If delta is None, no-op.
-        """
+        """Apply a state delta produced by the deliberator to the canonical latent_state."""
         if delta is None or self.latent_state is None:
             return
-        # Simple elementwise addition for list-like states
         try:
             if isinstance(self.latent_state, list) and isinstance(delta, list):
                 for i in range(min(len(self.latent_state), len(delta))):
@@ -179,28 +225,55 @@ class CRSM(nn.Module):
                         continue
                     self.latent_state[i] = self.latent_state[i] + delta[i]
             else:
-                # If single tensor style
                 self.latent_state = self.latent_state + delta
         except Exception:
-            # If incompatible shapes, ignore delta to avoid crashes
             return
+    
+    def sample_next_token(self, logits: torch.Tensor) -> int:
+        """Sample next token with temperature and nucleus sampling."""
+        logits = logits / self.temperature
+        
+        # Top-k filtering
+        if self.top_k > 0:
+            indices_to_remove = logits < torch.topk(logits, min(self.top_k, logits.size(-1)))[0][..., -1, None]
+            logits[indices_to_remove] = float('-inf')
+        
+        # Top-p (nucleus) filtering
+        if self.top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            
+            sorted_indices_to_remove = cumulative_probs > self.top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            
+            indices_to_remove = sorted_indices_to_remove.scatter(
+                dim=-1, index=sorted_indices, src=sorted_indices_to_remove
+            )
+            logits[indices_to_remove] = float('-inf')
+        
+        # Sample
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).item()
     
     async def think_and_generate(self, 
                                prompt: torch.Tensor,
-                               max_length: int = 100) -> torch.Tensor:
+                               max_length: int = 100,
+                               use_sampling: bool = True) -> torch.Tensor:
         """
         Generate text with active reasoning
         Args:
             prompt: Input prompt tensor
             max_length: Maximum length to generate
+            use_sampling: If True, use temperature sampling; if False, use MCTS
         Returns:
             Generated sequence tensor
         """
         current_sequence = prompt.clone()
         states = None
+        
         # Background worker that continuously updates a suggested token
         async def _bg_worker():
-            # create queue and lock if needed
             if self._bg_queue is None:
                 self._bg_queue = asyncio.Queue(maxsize=8)
             if self._state_lock is None:
@@ -208,76 +281,70 @@ class CRSM(nn.Module):
 
             try:
                 while True:
-                    # take a consistent snapshot of sequence + state
                     async with self._state_lock:
                         seq_copy = current_sequence.clone()
                         state_copy = None
                         if self.latent_state is not None:
-                            # shallow clone; may be list of tensors
                             try:
                                 state_copy = [s.clone() if s is not None else None for s in self.latent_state]
                             except Exception:
                                 state_copy = self.latent_state
 
-                    # run deliberation (runs off event loop inside reasoning.deliberate)
                     suggestion, delta = await self.reasoning.deliberate(seq_copy, state_copy)
 
-                    # try to enqueue suggestion non-blocking
                     try:
                         self._bg_queue.put_nowait((suggestion, delta))
                     except asyncio.QueueFull:
-                        # drop suggestion when queue is full to avoid blocking
                         pass
 
-                    # small pause to yield
                     await asyncio.sleep(0.01)
             except asyncio.CancelledError:
                 return
 
-        # start background worker
-        self._bg_task = asyncio.create_task(_bg_worker())
+        # Start background worker only if using MCTS
+        if not use_sampling:
+            self._bg_task = asyncio.create_task(_bg_worker())
 
         for _ in range(max_length):
-            # Get current logits and states (keeps states for warm start)
+            # Get current logits and states
             logits, states = self.forward(current_sequence, states)
 
-            # Update canonical latent_state with the new per-layer states
+            # Update canonical latent_state
             if states is not None:
-                # clone states to avoid aliasing
                 try:
                     async with self._state_lock:
                         self.latent_state = [s.clone() if s is not None else None for s in states]
                 except Exception:
-                    # best-effort: assign directly if cloning fails
                     async with self._state_lock:
                         self.latent_state = states
 
-            # Try to use background suggestion if available
-            next_token = None
-            delta = None
-            suggestion = None
-            if self._bg_queue is not None:
-                try:
-                    suggestion, delta = self._bg_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    suggestion = None
+            if use_sampling:
+                # Use temperature sampling (faster, more diverse)
+                next_token = self.sample_next_token(logits[0, -1])
+            else:
+                # Use MCTS (slower, more deliberate)
+                suggestion = None
+                delta = None
+                if self._bg_queue is not None:
+                    try:
+                        suggestion, delta = self._bg_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        suggestion = None
 
-            if suggestion is None:
-                # fallback to direct deliberation (will run in thread)
-                suggestion, delta = await self.reasoning.deliberate(current_sequence, self.latent_state)
+                if suggestion is None:
+                    suggestion, delta = await self.reasoning.deliberate(current_sequence, self.latent_state)
 
-            next_token = int(suggestion)
+                next_token = int(suggestion)
 
-            # apply any proposed state delta
-            if delta is not None:
-                async with self._state_lock:
-                    self.apply_state_delta(delta)
+                if delta is not None:
+                    async with self._state_lock:
+                        self.apply_state_delta(delta)
 
-            # Append token and continue (preserve batch dim)
+            # Append token
             token_tensor = torch.tensor([[next_token]], device=prompt.device, dtype=prompt.dtype)
             current_sequence = torch.cat([current_sequence, token_tensor], dim=1)
 
-        # stop background worker
+        # Stop background worker
         if self._bg_task is not None:
             self._bg_task.cancel()
             try:
@@ -285,11 +352,10 @@ class CRSM(nn.Module):
             except asyncio.CancelledError:
                 pass
             self._bg_task = None
-        # clear queue
+        
         if self._bg_queue is not None:
             self._bg_queue = None
 
-        # Return as 1-D sequence (remove batch dim)
         return current_sequence.squeeze(0)
     
     def start_autonomous_thinking(self):
@@ -304,11 +370,9 @@ class CRSM(nn.Module):
     async def _autonomous_loop(self):
         """Internal autonomous thinking loop"""
         while self.autonomous_mode:
-            # Ensure latent state exists
             if self.latent_state is None:
                 self.init_latent_state(device=next(self.parameters()).device)
 
-            # run deliberation on latent state snapshot and apply any delta
             if self._state_lock is None:
                 self._state_lock = asyncio.Lock()
 
@@ -323,7 +387,7 @@ class CRSM(nn.Module):
                 async with self._state_lock:
                     self.apply_state_delta(delta)
 
-            await asyncio.sleep(0.1)  # Prevent CPU overload
+            await asyncio.sleep(0.1)
             
     def stop_autonomous_thinking(self):
         """Stop autonomous thinking loop"""

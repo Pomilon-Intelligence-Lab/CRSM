@@ -1,5 +1,5 @@
 """
-Synthetic dataset and dataloader for quick SLM experiments.
+Fixed dataset module with proper tokenizer handling.
 """
 from typing import Iterator, Optional
 import torch
@@ -16,6 +16,7 @@ try:
 except Exception:
     load_dataset = None  # type: ignore
     HAS_DATASETS = False
+
 
 class RandomTokenDataset(Dataset):
     """Generates random token sequences for a quick PoC training loop."""
@@ -46,14 +47,17 @@ class RealTextDataset(Dataset):
     """Loads text files from a directory, builds a simple token-level vocab,
     and yields sequences for next-token prediction.
     """
-    def __init__(self, data_dir: str, seq_len: int = 128, min_freq: int = 2, tokenizer: Optional[object] = None, hf_tokenizer_name: Optional[str] = None):
+    def __init__(self, data_dir: str, seq_len: int = 128, min_freq: int = 2, 
+                 tokenizer: Optional[object] = None, hf_tokenizer_name: Optional[str] = None,
+                 vocab_size: Optional[int] = None):
         """
         Args:
             data_dir: directory with .txt files
             seq_len: length of sequence (including next-token target)
             min_freq: minimum token frequency for building simple vocab (ignored if tokenizer provided)
-            tokenizer: optional callable/tokenizer object. If provided, it should accept a string and return a list of token ids or a dict with 'input_ids'.
-            hf_tokenizer_name: optional Hugging Face tokenizer name (AutoTokenizer will be loaded if available)
+            tokenizer: optional callable/tokenizer object
+            hf_tokenizer_name: optional Hugging Face tokenizer name
+            vocab_size: vocab size for simple tokenizer
         """
         self.data_dir = Path(data_dir)
         files = list(self.data_dir.glob('**/*.txt'))
@@ -61,6 +65,9 @@ class RealTextDataset(Dataset):
         # If an HF tokenizer name is provided, build a Tokenizer wrapper
         if hf_tokenizer_name is not None:
             tokenizer = Tokenizer(hf_name=hf_tokenizer_name)
+        elif tokenizer is None:
+            # Create tokenizer with vocab_size
+            tokenizer = Tokenizer(vocab_size=vocab_size, prepopulate=False)
 
         self._use_hf = tokenizer is not None
 
@@ -69,14 +76,21 @@ class RealTextDataset(Dataset):
             data = []
             for p in files:
                 txt = p.read_text(encoding='utf-8')
-                ids = tokenizer.encode(txt)
+                # Tokenize with truncation disabled (we'll chunk it ourselves)
+                # Use add_special_tokens=False to avoid adding extra tokens
+                if hasattr(tokenizer, '_hf') and tokenizer._hf is not None:
+                    # Direct HF tokenizer
+                    ids = tokenizer._hf.encode(txt, add_special_tokens=False)
+                else:
+                    # Tokenizer wrapper
+                    ids = tokenizer.encode(txt)
                 data.extend(ids)
             self.data = torch.tensor(data, dtype=torch.long)
             self.seq_len = seq_len
             self.vocab = None
             return
 
-        # Legacy simple whitespace tokenizer path
+        # Legacy simple whitespace tokenizer path (shouldn't reach here anymore)
         all_tokens = []
         for p in files:
             txt = p.read_text(encoding='utf-8')
@@ -96,6 +110,13 @@ class RealTextDataset(Dataset):
         self.data = torch.tensor(data, dtype=torch.long)
         self.seq_len = seq_len
 
+    def __len__(self):
+        return max(0, len(self.data) - self.seq_len)
+
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor]:
+        seq = self.data[idx: idx + self.seq_len]
+        return seq[:-1].clone(), seq[1:].clone()
+
 
 class StreamingTextDataset(IterableDataset):
     """An iterable dataset that streams tokens from large text corpora.
@@ -109,11 +130,16 @@ class StreamingTextDataset(IterableDataset):
     """
     def __init__(self, data_dir: Optional[str] = None, file_patterns: Optional[Iterable[str]] = None,
                  seq_len: int = 128, tokenizer: Optional[object] = None, hf_tokenizer_name: Optional[str] = None,
-                 dataset_name: Optional[str] = None):
+                 dataset_name: Optional[str] = None, vocab_size: Optional[int] = None):
         self.seq_len = seq_len
         self.tokenizer = tokenizer
+        
+        # Create tokenizer if not provided
         if hf_tokenizer_name is not None:
             self.tokenizer = Tokenizer(hf_name=hf_tokenizer_name)
+        elif self.tokenizer is None:
+            # Use simple tokenizer with vocab_size
+            self.tokenizer = Tokenizer(vocab_size=vocab_size, prepopulate=False)
 
         # data source selection
         self.data_dir = Path(data_dir) if data_dir else None
@@ -131,10 +157,7 @@ class StreamingTextDataset(IterableDataset):
 
         for p in files:
             txt = p.read_text(encoding='utf-8')
-            if self.tokenizer is not None:
-                ids = self.tokenizer.encode(txt)
-            else:
-                ids = Tokenizer().encode(txt)
+            ids = self.tokenizer.encode(txt)
             for i in ids:
                 yield i
 
@@ -146,10 +169,7 @@ class StreamingTextDataset(IterableDataset):
             txt = item.get('text') if isinstance(item, dict) else str(item)
             if not txt:
                 continue
-            if self.tokenizer is not None:
-                ids = self.tokenizer.encode(txt)
-            else:
-                ids = Tokenizer().encode(txt)
+            ids = self.tokenizer.encode(txt)
             for i in ids:
                 yield i
 
@@ -168,11 +188,3 @@ class StreamingTextDataset(IterableDataset):
                 inp = torch.tensor(seq[:-1], dtype=torch.long)
                 tgt = torch.tensor(seq[1:], dtype=torch.long)
                 yield inp, tgt
-
-
-    def __len__(self):
-        return max(0, len(self.data) - self.seq_len)
-
-    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor]:
-        seq = self.data[idx: idx + self.seq_len]
-        return seq[:-1].clone(), seq[1:].clone()
