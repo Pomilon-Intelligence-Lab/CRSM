@@ -1,5 +1,5 @@
 """
-Evaluate CRSM model on standard metrics.
+Evaluate CRSM model on standard metrics including self-modification impact.
 """
 import torch
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 import sys
+import asyncio
 
 sys.path.insert(0, '.')
 
@@ -30,7 +31,7 @@ def compute_perplexity(model, dataloader, device, vocab_size):
             x = x.to(device)
             y = y.to(device)
             
-            logits, _ = model(x, states=None)
+            logits, _ = model.backbone(x, states=None)
             
             loss = criterion(
                 logits.reshape(-1, vocab_size),
@@ -46,14 +47,14 @@ def compute_perplexity(model, dataloader, device, vocab_size):
     return perplexity, avg_loss
 
 
-def evaluate_generation_quality(model, tokenizer, prompts, device):
+async def evaluate_generation_quality(model, tokenizer, prompts, device, use_mcts=False):
     """Evaluate generation quality metrics."""
-    import asyncio
     
     results = {
         'repetition_scores': [],
         'diversity_scores': [],
         'length_scores': [],
+        'state_changes': [] if use_mcts else None,
     }
     
     async def generate_one(prompt):
@@ -64,19 +65,39 @@ def evaluate_generation_quality(model, tokenizer, prompts, device):
         prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         model.init_latent_state(batch_size=1, device=device)
         
+        # Capture initial state if using MCTS
+        if use_mcts:
+            initial_state = [s.clone() if s is not None else None for s in model.latent_state]
+        
         try:
             generated = await model.think_and_generate(
                 prompt=prompt_tensor,
                 max_length=30,
-                use_sampling=True
+                use_sampling=(not use_mcts)
             )
+            
+            # Measure state change
+            if use_mcts:
+                final_state = model.latent_state
+                total_change = 0.0
+                num_layers = 0
+                
+                for s_init, s_final in zip(initial_state, final_state):
+                    if s_init is not None and s_final is not None:
+                        change = torch.norm(s_final - s_init).item()
+                        total_change += change
+                        num_layers += 1
+                
+                avg_change = total_change / max(1, num_layers)
+                results['state_changes'].append(avg_change)
+            
             return generated.cpu().tolist()
         except Exception as e:
-            print(f"  Warning: Generation failed for prompt: {e}")
-            return prompt_ids  # Return prompt on failure
+            print(f"  Warning: Generation failed: {e}")
+            return prompt_ids
     
-    for prompt in tqdm(prompts, desc="Generating samples"):
-        gen_ids = asyncio.run(generate_one(prompt))
+    for prompt in tqdm(prompts, desc=f"Generating ({'MCTS' if use_mcts else 'Sampling'})"):
+        gen_ids = await generate_one(prompt)
         
         if len(gen_ids) < 2:
             continue
@@ -95,11 +116,17 @@ def evaluate_generation_quality(model, tokenizer, prompts, device):
         # Length
         results['length_scores'].append(len(gen_ids))
     
-    return {
+    metrics = {
         'avg_repetition_score': np.mean(results['repetition_scores']) if results['repetition_scores'] else 0.0,
         'avg_diversity_score': np.mean(results['diversity_scores']) if results['diversity_scores'] else 0.0,
         'avg_length': np.mean(results['length_scores']) if results['length_scores'] else 0.0,
     }
+    
+    if use_mcts and results['state_changes']:
+        metrics['avg_state_change'] = np.mean(results['state_changes'])
+        metrics['std_state_change'] = np.std(results['state_changes'])
+    
+    return metrics
 
 
 def main():
@@ -107,10 +134,13 @@ def main():
     parser.add_argument('--model-path', required=True)
     parser.add_argument('--vocab-path', required=True)
     parser.add_argument('--config-path', required=True)
-    parser.add_argument('--test-data', required=True, help='Test data directory')
+    parser.add_argument('--test-data', required=True)
+    parser.add_argument('--dynamics-path', default=None)
     parser.add_argument('--output', default='evaluation_results.json')
-    parser.add_argument('--num-test-samples', type=int, default=1000, help='Max test samples')
-    parser.add_argument('--skip-generation', action='store_true', help='Skip generation eval')
+    parser.add_argument('--num-test-samples', type=int, default=1000)
+    parser.add_argument('--skip-generation', action='store_true')
+    parser.add_argument('--compare-mcts', action='store_true',
+                       help='Compare MCTS vs sampling generation')
     
     args = parser.parse_args()
     
@@ -141,7 +171,7 @@ def main():
     )
     
     checkpoint = torch.load(args.model_path, map_location=device)
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    state_dict = checkpoint.get('model_state_dict', checkpoint.get('model_state', checkpoint))
     
     if any(k.startswith('backbone.') for k in state_dict.keys()):
         model.load_state_dict(state_dict, strict=False)
@@ -149,6 +179,11 @@ def main():
     else:
         model.backbone.load_state_dict(state_dict, strict=False)
         print("✓ Loaded backbone checkpoint")
+    
+    # Load dynamics if available
+    has_dynamics = False
+    if args.dynamics_path and Path(args.dynamics_path).exists():
+        has_dynamics = model.load_dynamics(args.dynamics_path)
     
     model.to(device)
     model.eval()
@@ -167,7 +202,6 @@ def main():
         vocab_size=config.vocab_size
     )
     
-    # Limit test set size for faster evaluation
     test_size = min(len(test_dataset), args.num_test_samples)
     test_subset = torch.utils.data.Subset(test_dataset, range(test_size))
     test_loader = DataLoader(test_subset, batch_size=16, shuffle=False)
@@ -179,16 +213,22 @@ def main():
     print("="*70)
     
     # 1. Perplexity
-    print("\n[1/2] Computing perplexity...")
+    print("\n[1/3] Computing perplexity...")
     perplexity, loss = compute_perplexity(model.backbone, test_loader, device, config.vocab_size)
     print(f"  Perplexity: {perplexity:.2f}")
     print(f"  Loss: {loss:.4f}")
     
-    gen_metrics = {}
+    results = {
+        'perplexity': float(perplexity),
+        'loss': float(loss),
+        'model_path': args.model_path,
+        'vocab_size': config.vocab_size,
+        'test_samples': test_size,
+        'has_dynamics': has_dynamics,
+    }
     
-    # 2. Generation quality (optional, slow)
+    # 2. Generation quality
     if not args.skip_generation:
-        print("\n[2/2] Evaluating generation quality...")
         test_prompts = [
             "The model",
             "Training on",
@@ -196,23 +236,41 @@ def main():
             "The system",
             "Neural networks",
         ]
-        gen_metrics = evaluate_generation_quality(model, tokenizer, test_prompts, device)
-        print(f"  Repetition Score: {gen_metrics['avg_repetition_score']:.3f}")
-        print(f"  Diversity Score: {gen_metrics['avg_diversity_score']:.3f}")
-        print(f"  Avg Length: {gen_metrics['avg_length']:.1f}")
+        
+        # Sampling generation
+        print("\n[2/3] Evaluating generation (sampling)...")
+        sampling_metrics = asyncio.run(evaluate_generation_quality(
+            model, tokenizer, test_prompts, device, use_mcts=False
+        ))
+        results['sampling'] = sampling_metrics
+        
+        print(f"  Repetition: {sampling_metrics['avg_repetition_score']:.3f}")
+        print(f"  Diversity: {sampling_metrics['avg_diversity_score']:.3f}")
+        print(f"  Avg Length: {sampling_metrics['avg_length']:.1f}")
+        
+        # MCTS generation (if requested and dynamics available)
+        if args.compare_mcts and has_dynamics:
+            print("\n[3/3] Evaluating generation (MCTS)...")
+            mcts_metrics = asyncio.run(evaluate_generation_quality(
+                model, tokenizer, test_prompts, device, use_mcts=True
+            ))
+            results['mcts'] = mcts_metrics
+            
+            print(f"  Repetition: {mcts_metrics['avg_repetition_score']:.3f}")
+            print(f"  Diversity: {mcts_metrics['avg_diversity_score']:.3f}")
+            print(f"  Avg Length: {mcts_metrics['avg_length']:.1f}")
+            print(f"  State Change: {mcts_metrics.get('avg_state_change', 0):.6f}")
+            
+            # Comparison
+            print("\n  Comparison (MCTS vs Sampling):")
+            print(f"    Repetition: {(mcts_metrics['avg_repetition_score'] - sampling_metrics['avg_repetition_score'])*100:+.1f}%")
+            print(f"    Diversity: {(mcts_metrics['avg_diversity_score'] - sampling_metrics['avg_diversity_score'])*100:+.1f}%")
+        else:
+            print("\n[3/3] Skipping MCTS evaluation")
     else:
-        print("\n[2/2] Skipping generation evaluation")
+        print("\n[2/3] Skipping generation evaluation")
     
     # Save results
-    results = {
-        'perplexity': float(perplexity),
-        'loss': float(loss),
-        **gen_metrics,
-        'model_path': args.model_path,
-        'vocab_size': config.vocab_size,
-        'test_samples': test_size,
-    }
-    
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -221,15 +279,6 @@ def main():
     
     print(f"\n✓ Results saved to {args.output}")
     print("="*70)
-    
-    # Print summary
-    print("\nSUMMARY:")
-    print(f"  Model: {Path(args.model_path).name}")
-    print(f"  Perplexity: {perplexity:.2f}")
-    print(f"  Loss: {loss:.4f}")
-    if not args.skip_generation:
-        print(f"  Diversity: {gen_metrics['avg_diversity_score']:.3f}")
-        print(f"  Repetition: {gen_metrics['avg_repetition_score']:.3f}")
 
 
 if __name__ == '__main__':
