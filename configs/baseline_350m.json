@@ -1,0 +1,39 @@
+{
+  "name": "CRSM Large (350M)",
+  
+  "model": {
+    "vocab_size": 50257,
+    "d_model": 1536,
+    "d_state": 768,
+    "d_ffn": 6144,
+    "num_layers": 24,
+    "dropout": 0.1
+  },
+  
+  "training": {
+    "backbone_epochs": 1,
+    "finetune_epochs": 0,
+    "batch_size": 128,
+    "seq_len": 1024,
+    "lr": 6e-4,
+    "finetune_lr": 2e-5
+  },
+  
+  "dynamics": {
+    "dynamics_samples": 500000,
+    "dynamics_epochs": 10,
+    "dynamics_lr": 1e-4
+  },
+  
+  "reasoning": {
+    "c_puct": 1.0,
+    "n_simulations": 100
+  },
+  
+  "system": {
+    "seed": 42,
+    "device": "cuda"
+  },
+  
+  "_comment": "Large configuration targeting approx. 350M parameters for the CRSM architecture."
+}

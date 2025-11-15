@@ -1,0 +1,39 @@
+{
+  "name": "CRSM Small (for testing)",
+  
+  "model": {
+    "vocab_size": 1000,
+    "d_model": 128,
+    "d_state": 64,
+    "d_ffn": 512,
+    "num_layers": 2,
+    "dropout": 0.1
+  },
+  
+  "training": {
+    "backbone_epochs": 3,
+    "finetune_epochs": 2,
+    "batch_size": 16,
+    "seq_len": 32,
+    "lr": 1e-3,
+    "finetune_lr": 5e-4
+  },
+  
+  "dynamics": {
+    "dynamics_samples": 5000,
+    "dynamics_epochs": 5,
+    "dynamics_lr": 1e-3
+  },
+  
+  "reasoning": {
+    "c_puct": 3.0,
+    "n_simulations": 50
+  },
+  
+  "system": {
+    "seed": 42,
+    "device": null
+  },
+  
+  "_comment": "Small config for quick testing and CI. Use baseline_350m.json or a custom one for real experiments."
+}

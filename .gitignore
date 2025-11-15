@@ -61,8 +61,6 @@ runs/
 # Data
 data/
 *.csv
-*.json
-*.jsonl
 cache/
 huggingface/
 
@@ -77,3 +75,4 @@ Thumbs.db
 
 # Misc
 wandb/
+experiments/
