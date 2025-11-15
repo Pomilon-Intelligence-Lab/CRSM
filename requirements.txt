@@ -29,3 +29,4 @@ psutil>=5.9.0
 # Optional: Advanced features
 # mamba-ssm>=1.0.0
 # state-spaces>=1.0.0
+pytest-asyncio>=0.21.0

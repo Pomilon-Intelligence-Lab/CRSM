@@ -1,12 +1,12 @@
 {
-  "name": "CRSM 350M Baseline",
+  "name": "CRSM 170M Baseline",
   
   "model": {
     "vocab_size": 50257,
-    "d_model": 1280,
-    "d_state": 320,
-    "d_ffn": 5120,
-    "num_layers": 20,
+    "d_model": 1024,
+    "d_state": 256,
+    "d_ffn": 4096,
+    "num_layers": 16,
     "dropout": 0.1
   },
   
@@ -39,7 +39,7 @@
   
   "tokenizer": "gpt2",
   "seed": 42,
-  "device": "cuda",
+  "device": "cpu",
   
   "_comment": "Realistic 350M model. Trains to convergence with proper settings."
 }

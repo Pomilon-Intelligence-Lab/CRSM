@@ -2,7 +2,7 @@
   "name": "CRSM Small (for testing)",
   
   "model": {
-    "vocab_size": 1000,
+    "vocab_size": 50257,
     "d_model": 128,
     "d_state": 64,
     "d_ffn": 512,
@@ -11,29 +11,35 @@
   },
   
   "training": {
-    "backbone_epochs": 3,
+    "backbone_epochs": 5,
     "finetune_epochs": 2,
-    "batch_size": 16,
-    "seq_len": 32,
+    "batch_size": 32,
+    "seq_len": 128,
     "lr": 1e-3,
-    "finetune_lr": 5e-4
+    "finetune_lr": 5e-4,
+    "grad_accum": 1,
+    "use_amp": false
   },
   
   "dynamics": {
-    "dynamics_samples": 5000,
+    "dynamics_samples": 1000,
     "dynamics_epochs": 5,
     "dynamics_lr": 1e-3
   },
   
   "reasoning": {
-    "c_puct": 3.0,
-    "n_simulations": 50
+    "c_puct": 1.0,
+    "n_simulations": 3
   },
   
-  "system": {
-    "seed": 42,
-    "device": null
+  "data": { 
+    "data_dir": "data/text_corpus",
+    "traces_path": "data/train_traces.jsonl"
   },
   
-  "_comment": "Small config for quick testing and CI. Use baseline_350m.json or a custom one for real experiments."
+  "tokenizer": "gpt2",
+  "seed": 42,
+  "device": "cpu",
+  
+  "_comment": "Small config for quick testing. Uses SimpleVocab (no HF tokenizer)."
 }

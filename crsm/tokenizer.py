@@ -105,21 +105,26 @@ class SimpleVocab:
 
 
 class Tokenizer:
-    def __init__(self, hf_name: Optional[str] = None, vocab_size: Optional[int] = None, prepopulate: bool = False):
+    def __init__(self, hf_name: Optional[str] = 'gpt2', vocab_size: Optional[int] = None, 
+                 prepopulate: bool = False):
         """
         Args:
-            hf_name: HuggingFace tokenizer name (e.g., 'gpt2')
-            vocab_size: Fixed vocab size for SimpleVocab fallback
-            prepopulate: If True, pre-fill SimpleVocab with placeholders (for decoding only)
+            hf_name: HuggingFace tokenizer name (default: 'gpt2')
+            vocab_size: Ignored if hf_name provided (for backwards compatibility)
+            prepopulate: Ignored if hf_name provided
         """
-        self._hf = None
-        self._simple = None
-        if hf_name is not None:
-            if not HAS_HF:
-                raise RuntimeError('transformers not available to load HF tokenizer')
+        try:
             self._hf = AutoTokenizer.from_pretrained(hf_name, use_fast=True)
-        else:
-            self._simple = SimpleVocab(fixed_vocab_size=vocab_size, prepopulate=prepopulate)
+            self._simple = None
+            print(f"✓ Loaded {hf_name} tokenizer (vocab_size={self._hf.vocab_size})")
+        except ImportError:
+            print("⚠ transformers not available, falling back to SimpleVocab")
+            self._hf = None
+            self._simple = SimpleVocab(vocab_size, prepopulate)
+        except Exception as e:
+            print(f"⚠ Could not load {hf_name}: {e}, falling back to SimpleVocab")
+            self._hf = None
+            self._simple = SimpleVocab(vocab_size, prepopulate)
 
     def encode(self, text: str) -> List[int]:
         if self._hf is not None:

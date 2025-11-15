@@ -173,6 +173,13 @@ class CRSM(nn.Module):
         # Canonical latent state and lock for concurrency
         self.latent_state = None
         self._state_lock = asyncio.Lock()
+        
+        # Background deliberation components (initialized lazily)
+        self._deliberation_task = None
+        self._deliberation_requests = None
+        self._deliberation_results = {}
+        self._stop_deliberation = False
+        self.state_update_queue = asyncio.Queue()
     
     def load_dynamics(self, dynamics_path: str):
         """Load trained dynamics model."""
@@ -256,106 +263,217 @@ class CRSM(nn.Module):
         probs = F.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).item()
     
-    async def think_and_generate(self, 
-                               prompt: torch.Tensor,
-                               max_length: int = 100,
-                               use_sampling: bool = True) -> torch.Tensor:
-        """
-        Generate text with active reasoning
-        Args:
-            prompt: Input prompt tensor
-            max_length: Maximum length to generate
-            use_sampling: If True, use temperature sampling; if False, use MCTS
-        Returns:
-            Generated sequence tensor
-        """
-        current_sequence = prompt.clone()
-        states = None
+    def _start_background_deliberation(self):
+        """Start async MCTS worker."""
+        if self._deliberation_task is not None:
+            return  # Already running
         
-        # Background worker that continuously updates a suggested token
-        async def _bg_worker():
-            if self._bg_queue is None:
-                self._bg_queue = asyncio.Queue(maxsize=8)
-            if self._state_lock is None:
-                self._state_lock = asyncio.Lock()
+        # Initialize components on first use
+        if self._state_lock is None:
+            self._state_lock = asyncio.Lock()
+        
+        if self.state_update_queue is None:
+            self.state_update_queue = asyncio.Queue()
+        
+        if self._deliberation_requests is None:
+            self._deliberation_requests = asyncio.Queue()
+        
+        self._deliberation_results = {}
+        self._stop_deliberation = False
+        
+        self._deliberation_task = asyncio.create_task(self._deliberation_worker())
+        print("✓ Started background deliberation worker")
 
+    def _ensure_async_components(self):
+        """Ensure async components are initialized."""
+        if not hasattr(self, '_deliberation_task'):
+            self._deliberation_task = None
+        if not hasattr(self, '_deliberation_requests'):
+            self._deliberation_requests = None
+        if not hasattr(self, '_deliberation_results'):
+            self._deliberation_results = {}
+        if not hasattr(self, '_state_lock'):
+            self._state_lock = None
+        if not hasattr(self, 'state_update_queue'):
+            self.state_update_queue = None
+        if not hasattr(self, '_stop_deliberation'):
+            self._stop_deliberation = False
+
+    async def _deliberation_worker(self):
+        """Background MCTS loop - runs continuously."""
+        print("[Deliberation Worker] Started")
+        
+        while not self._stop_deliberation:
             try:
-                while True:
-                    async with self._state_lock:
-                        seq_copy = current_sequence.clone()
-                        state_copy = None
-                        if self.latent_state is not None:
-                            try:
-                                state_copy = [s.clone() if s is not None else None for s in self.latent_state]
-                            except Exception:
-                                state_copy = self.latent_state
-
-                    suggestion, delta = await self.reasoning.deliberate(seq_copy, state_copy)
-
-                    try:
-                        self._bg_queue.put_nowait((suggestion, delta))
-                    except asyncio.QueueFull:
-                        pass
-
-                    await asyncio.sleep(0.01)
-            except asyncio.CancelledError:
-                return
-
-        # Start background worker only if using MCTS
-        if not use_sampling:
-            self._bg_task = asyncio.create_task(_bg_worker())
-
-        for _ in range(max_length):
-            # Get current logits and states
-            logits, states = self.forward(current_sequence, states)
-
-            # Update canonical latent_state
-            if states is not None:
-                try:
-                    async with self._state_lock:
-                        self.latent_state = [s.clone() if s is not None else None for s in states]
-                except Exception:
-                    async with self._state_lock:
-                        self.latent_state = states
-
-            if use_sampling:
-                # Use temperature sampling (faster, more diverse)
-                next_token = self.sample_next_token(logits[0, -1])
-            else:
-                # Use MCTS (slower, more deliberate)
-                suggestion = None
-                delta = None
-                if self._bg_queue is not None:
-                    try:
-                        suggestion, delta = self._bg_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        suggestion = None
-
-                if suggestion is None:
-                    suggestion, delta = await self.reasoning.deliberate(current_sequence, self.latent_state)
-
-                next_token = int(suggestion)
-
+                # Get next deliberation request (non-blocking)
+                request = await asyncio.wait_for(
+                    self._deliberation_requests.get(), 
+                    timeout=0.1
+                )
+                
+                position, sequence = request
+                
+                # Copy current state (locked)
+                async with self._state_lock:
+                    state_copy = [s.clone() if s is not None else None 
+                                for s in self.latent_state]
+                
+                # Run MCTS (this is the slow part, but it's in background)
+                print(f"  [Deliberation] Planning for position {position}...")
+                
+                # Run on GPU but in separate async context
+                action, delta = await asyncio.to_thread(
+                    self.reasoning.deliberate_sync,
+                    sequence,
+                    state_copy
+                )
+                
+                # Store result
+                confidence = self._compute_confidence(action, delta)
+                self._deliberation_results[position] = (action, confidence)
+                
+                # Queue state update
                 if delta is not None:
-                    async with self._state_lock:
-                        self.apply_state_delta(delta)
-
-            # Append token
-            token_tensor = torch.tensor([[next_token]], device=prompt.device, dtype=prompt.dtype)
-            current_sequence = torch.cat([current_sequence, token_tensor], dim=1)
-
-        # Stop background worker
-        if self._bg_task is not None:
-            self._bg_task.cancel()
-            try:
-                await self._bg_task
-            except asyncio.CancelledError:
-                pass
-            self._bg_task = None
+                    await self.state_update_queue.put((position, delta))
+                
+                print(f"  [Deliberation] Completed for position {position}: token={action}")
+                
+            except asyncio.TimeoutError:
+                # No requests, keep looping
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                print(f"[Deliberation Worker] Error: {e}")
+                await asyncio.sleep(0.1)
         
-        if self._bg_queue is not None:
-            self._bg_queue = None
+        print("[Deliberation Worker] Stopped")
 
+    def _stop_background_deliberation(self):
+        """Stop background worker."""
+        self._stop_deliberation = True
+        if self._deliberation_task is not None:
+            self._deliberation_task.cancel()
+            self._deliberation_task = None
+        print("✓ Stopped background deliberation worker")
+
+    def _request_deliberation(self, position, sequence):
+        """Request MCTS to deliberate on future token (non-blocking)."""
+        try:
+            self._deliberation_requests.put_nowait((position, sequence))
+        except asyncio.QueueFull:
+            # Queue full, skip this request
+            pass
+
+    def _get_suggestion(self, position, timeout=0):
+        """Get deliberation result if ready (non-blocking)."""
+        if position in self._deliberation_results:
+            result = self._deliberation_results.pop(position)
+            return result
+        return None
+
+    async def _apply_pending_deltas(self):
+        """Apply state corrections from deliberation (non-blocking)."""
+        try:
+            while not self.state_update_queue.empty():
+                position, delta = self.state_update_queue.get_nowait()
+                
+                # Apply delta to current state
+                async with self._state_lock:
+                    self.apply_state_delta(delta)
+                
+                print(f"  [State] Applied delta from position {position}")
+        except asyncio.QueueEmpty:
+            pass
+
+    def _compute_confidence(self, action, delta):
+        """Estimate confidence in deliberated action."""
+        if delta is None:
+            return 0.5
+        
+        # Use magnitude of state change as confidence proxy
+        total_magnitude = sum(
+            torch.norm(d).item() for d in delta if d is not None
+        )
+        
+        # Normalize to [0, 1]
+        confidence = min(1.0, total_magnitude * 10)
+        return confidence
+    
+    async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
+        """
+        Generate tokens with asynchronous deliberation.
+        
+        Args:
+            use_deliberation: Enable background MCTS
+            deliberation_lag: Tokens ahead to deliberate (0=synchronous, 3=async)
+            fallback_to_sampling: If True, use sampling when deliberation isn't ready
+                                  If False, wait for deliberation (slower but more thoughtful)
+        """
+        self._ensure_async_components()
+        
+        # Start background deliberation task
+        if use_deliberation:
+            self._start_background_deliberation()
+        
+        current_sequence = prompt.clone()
+        states = self.backbone.init_state(batch_size=1, device=prompt.device)
+        self.latent_state = states
+        
+        generated_tokens = []
+        
+        for step in range(max_length):
+            # ============================================
+            # FAST PATH: Generate token immediately
+            # ============================================
+            with torch.no_grad():
+                logits, states = self.backbone(current_sequence, states)
+            
+            # Check if deliberation has a suggestion (non-blocking)
+            if use_deliberation:
+                if fallback_to_sampling:
+                    # Non-blocking: use suggestion if ready, else sample
+                    suggestion = self._get_suggestion(step, timeout=0)
+                else:
+                    # Blocking: wait for deliberation (original behavior)
+                    suggestion = self._get_suggestion(step, timeout=1.0)  # Wait up to 1s
+            else:
+                suggestion = None
+            
+            if suggestion is not None:
+                # Use deliberated action
+                next_token, confidence = suggestion
+                print(f"  [MCTS] Using deliberated token {next_token} (conf: {confidence:.2f})")
+            else:
+                # Fallback to sampling (instant)
+                next_token = self.sample_next_token(logits[0, -1])
+                print(f"  [Sample] Using sampled token {next_token}")
+            
+            # Update sequence
+            token_tensor = torch.tensor([[next_token]], device=prompt.device)
+            current_sequence = torch.cat([current_sequence, token_tensor], dim=1)
+            generated_tokens.append(next_token)
+            
+            # ============================================
+            # ASYNC: Update shared state (non-blocking)
+            # ============================================
+            async with self._state_lock:
+                self.latent_state = [s.clone() if s is not None else None for s in states]
+            
+            # Check for state updates from deliberation
+            await self._apply_pending_deltas()
+            
+            # ============================================
+            # ASYNC: Request deliberation for future tokens
+            # ============================================
+            if use_deliberation:
+                # Ask deliberation to work on token N steps ahead
+                future_position = step + deliberation_lag
+                self._request_deliberation(future_position, current_sequence.clone())
+        
+        # Stop background task
+        if use_deliberation:
+            self._stop_background_deliberation()
+        
+        # return torch.tensor(generated_tokens, device=prompt.device)
         return current_sequence.squeeze(0)
     
     def start_autonomous_thinking(self):

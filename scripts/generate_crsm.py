@@ -15,7 +15,7 @@ from crsm.model import CRSM, CRSMConfig
 from crsm.tokenizer import Tokenizer
 
 
-async def generate_text(model, tokenizer, prompt, max_length, device, use_sampling=True, show_metrics=False):
+async def generate_text(model, tokenizer, prompt, max_length, device, use_mcts=False, show_metrics=False):
     """Generate text with async deliberation and optional metrics."""
     
     # Tokenize prompt
@@ -35,26 +35,33 @@ async def generate_text(model, tokenizer, prompt, max_length, device, use_sampli
     model.init_latent_state(batch_size=1, device=device)
     initial_state = [s.clone() if s is not None else None for s in model.latent_state]
     
-    if use_sampling:
-        print(f"\nGenerating {max_length} tokens with temperature sampling (T={model.temperature})...")
-    else:
+    # Configure generation mode
+    if use_mcts:
         print(f"\nGenerating {max_length} tokens with {model.reasoning.n_simulations} MCTS simulations...")
         print("  (Self-modification active)")
+        print(f"  Deliberation lag: 3 tokens ahead")
+    else:
+        print(f"\nGenerating {max_length} tokens with temperature sampling (T={model.temperature})...")
     
     # Generate
     import time
     start_time = time.time()
     
+    # Call think_and_generate with correct parameters
+    # use_deliberation=False disables MCTS completely
+    # fallback_to_sampling=True means it won't block waiting for MCTS
     generated = await model.think_and_generate(
         prompt=prompt_tensor,
         max_length=max_length,
-        use_sampling=use_sampling
+        use_deliberation=use_mcts,  # Enable/disable MCTS
+        deliberation_lag=3,  # Look ahead 3 tokens
+        fallback_to_sampling=True  # Don't block on MCTS
     )
     
     elapsed = time.time() - start_time
     
     # Measure self-modification if MCTS was used
-    if not use_sampling and show_metrics:
+    if use_mcts and show_metrics:
         final_state = model.latent_state
         total_change = 0.0
         num_layers = 0
@@ -133,13 +140,15 @@ def load_model_from_checkpoint(checkpoint_path, config, device):
 def main():
     parser = argparse.ArgumentParser(description="Generate text with CRSM")
     parser.add_argument('--model-path', type=str, required=True)
-    parser.add_argument('--vocab-path', type=str, required=True)
+    parser.add_argument('--vocab-path', type=str, default=None,
+                       help='Path to vocab file (optional, uses GPT-2 tokenizer by default)')
     parser.add_argument('--dynamics-path', type=str, default=None)
     parser.add_argument('--config-path', type=str, default='configs/small.json')
     parser.add_argument('--prompt', type=str, required=True)
     parser.add_argument('--max-length', type=int, default=30)
     parser.add_argument('--device', type=str, default=None)
-    parser.add_argument('--use-mcts', action='store_true')
+    parser.add_argument('--use-mcts', action='store_true',
+                       help='Use MCTS for generation (requires dynamics)')
     parser.add_argument('--temperature', type=float, default=0.8)
     parser.add_argument('--top-k', type=int, default=50)
     parser.add_argument('--top-p', type=float, default=0.95)
@@ -172,29 +181,44 @@ def main():
                          ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f"Using device: {device}")
     
-    # Load tokenizer
-    print(f"\nLoading vocabulary from: {args.vocab_path}")
-    tokenizer = Tokenizer.from_vocab_file(args.vocab_path)
+    # Load tokenizer - use GPT-2 by default
+    print(f"\nLoading vocabulary...")
+    if args.vocab_path and Path(args.vocab_path).exists():
+        print(f"  From file: {args.vocab_path}")
+        tokenizer = Tokenizer.from_vocab_file(args.vocab_path)
+    else:
+        print(f"  Using GPT-2 tokenizer")
+        tokenizer = Tokenizer(hf_name="gpt2")
     print(f"✓ Loaded vocabulary with {tokenizer.vocab_size} tokens")
     
     # Load model
     print(f"\nLoading model from: {args.model_path}")
     model, is_crsm = load_model_from_checkpoint(args.model_path, config, device)
     
-    # Load dynamics
+    # Load dynamics if provided
     has_dynamics = False
     if args.dynamics_path and Path(args.dynamics_path).exists():
+        print(f"Loading dynamics from: {args.dynamics_path}")
         success = model.load_dynamics(args.dynamics_path)
         has_dynamics = success
-    elif is_crsm and 'dynamics.net.0.weight' in torch.load(args.model_path, map_location='cpu').get('model_state_dict', {}):
-        has_dynamics = True
-        print("  ✓ Using dynamics from checkpoint")
+        if success:
+            print("✓ Loaded dynamics from file")
+            print("✓ Connected dynamics to reasoning module")
+    elif is_crsm:
+        # Check if dynamics are in the checkpoint
+        checkpoint = torch.load(args.model_path, map_location='cpu')
+        state_dict = checkpoint.get('model_state_dict', checkpoint.get('model_state', checkpoint))
+        if any(k.startswith('dynamics.') for k in state_dict.keys()):
+            has_dynamics = True
+            print("✓ Using dynamics from checkpoint")
     
+    # Validate MCTS usage
     if args.use_mcts:
         if has_dynamics:
             print("  ✓ MCTS will use fast dynamics")
         else:
-            print("  ⚠ MCTS will use slow SSM fallback (no dynamics)")
+            print("  ⚠ WARNING: MCTS requested but no dynamics available!")
+            print("    Generation will fall back to SSM (slow) or sampling")
     
     # Generate
     print("\n" + "="*70)
@@ -208,7 +232,7 @@ def main():
             prompt=args.prompt,
             max_length=args.max_length,
             device=device,
-            use_sampling=(not args.use_mcts),
+            use_mcts=args.use_mcts,
             show_metrics=args.show_metrics
         )
     

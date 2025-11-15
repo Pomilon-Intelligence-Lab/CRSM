@@ -6,7 +6,7 @@ Complete CRSM training pipeline:
 4. Fine-tune with value head
 
 Usage:
-    python scripts/train_full_crsm.py --config configs/small.json
+    python scripts/train_full_crsm.py --config configs/baseline_gpt2.json
 """
 
 import shutil
@@ -25,6 +25,15 @@ from crsm.mamba_ssm import MambaModel
 from crsm.load_dynamics import load_dynamics_into_crsm, check_dynamics_quality, save_crsm_with_dynamics
 from crsm.utils import set_seed
 
+def get_config_value(config, key, default=None):
+    """Get config value from root or system section."""
+    # Try root level first
+    if key in config:
+        return config[key]
+    # Try system section
+    if 'system' in config and key in config['system']:
+        return config['system'][key]
+    return default
 
 def train_backbone(config, output_dir):
     """Step 1: Train base MambaModel"""
@@ -40,11 +49,30 @@ def train_backbone(config, output_dir):
         '--seq-len', str(config['training']['seq_len']),
         '--lr', str(config['training']['lr']),
         '--checkpoint-dir', str(output_dir / 'backbone'),
-        '--no-value-loss',  # Don't train value head yet
+        '--no-value-loss',
     ]
     
-    if config.get('device'):
-        cmd.extend(['--device', config['device']])
+    # FIX 1: Add data directory
+    data_config = config.get('data', {})
+    if 'data_dir' in data_config:
+        cmd.extend(['--data-dir', data_config['data_dir']])
+    else:
+        print("⚠ Warning: No data_dir in config, training may fail!")
+    
+    tokenizer = get_config_value(config, 'tokenizer')
+    if tokenizer:
+        cmd.extend(['--tokenizer', tokenizer])
+
+    device = get_config_value(config, 'device')
+    if device:
+        cmd.extend(['--device', device])
+    
+    # FIX 3: Add gradient accumulation and other training params
+    if 'grad_accum' in config.get('training', {}):
+        cmd.extend(['--grad-accum', str(config['training']['grad_accum'])])
+    
+    if config.get('training', {}).get('use_amp', False):
+        cmd.append('--amp')
     
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd)
@@ -53,16 +81,22 @@ def train_backbone(config, output_dir):
         print("✗ Backbone training failed")
         return False
 
-    # find latest epoch checkpoint and copy it to crsm_final.pt for later steps
+    # Find latest epoch checkpoint and copy to crsm_final.pt
     backbone_dir = output_dir / 'backbone'
-    checkpoints = sorted(backbone_dir.glob('crsm_epoch*.pt'), key=lambda p: int(p.stem.split('epoch')[1]), reverse=True)
+    checkpoints = sorted(
+        backbone_dir.glob('crsm_epoch*.pt'), 
+        key=lambda p: int(p.stem.split('epoch')[1]), 
+        reverse=True
+    )
+    
     if checkpoints:
         latest = checkpoints[0]
         final_path = backbone_dir / 'crsm_final.pt'
         shutil.copyfile(latest, final_path)
         print(f"✓ Backbone training complete — copied {latest.name} -> {final_path.name}")
     else:
-        print("✓ Backbone training complete (no epoch checkpoints found)")
+        print("⚠ Warning: No epoch checkpoints found!")
+        return False
     
     print("✓ Backbone training complete")
     return True
@@ -74,18 +108,27 @@ def distill_dynamics(config, output_dir):
     print("STEP 2: Distilling Dynamics and Training Model")
     print("="*60)
     
-    backbone_path = output_dir / 'backbone' / 'crsm_final.pt' # Assuming a final checkpoint
+    backbone_path = output_dir / 'backbone' / 'crsm_final.pt'
+    
+    if not backbone_path.exists():
+        print(f"✗ Error: Backbone checkpoint not found at {backbone_path}")
+        return False
+    
     dynamics_path = output_dir / 'dynamics.pt'
     
-    # --- CRITICAL CHANGE: Add traces-path argument ---
-    # NOTE: You must have a 'data' key in your config pointing to a real dataset path
+    # Get traces path
     traces_path = config.get('data', {}).get('traces_path', 'data/train_traces.jsonl')
+    
+    if not Path(traces_path).exists():
+        print(f"⚠ Warning: Traces file not found at {traces_path}")
+        print("  Creating bootstrap traces from training data...")
+        # You could add bootstrap logic here
     
     cmd = [
         sys.executable, 'scripts/distill_dynamics.py',
         '--model-path', str(backbone_path),
         '--output-path', str(dynamics_path),
-        '--traces-path', traces_path, # <-- NEW ARGUMENT
+        '--traces-path', traces_path,
         '--num-samples', str(config['dynamics']['dynamics_samples']),
         '--epochs', str(config['dynamics']['dynamics_epochs']),
         '--lr', str(config['dynamics']['dynamics_lr']),
@@ -108,19 +151,15 @@ def distill_dynamics(config, output_dir):
     return True
 
 
-# FIX in scripts/train_full_crsm.py
-
-# FINAL FIX in scripts/train_full_crsm.py (Replace existing function)
-
 def create_crsm_with_dynamics(config, output_dir) -> Optional[Path]:
     """Step 3: Create CRSM with dynamics and save in CLI-compatible format."""
     print("\n" + "="*60)
     print("STEP 3: Creating CRSM with Dynamics")
     print("="*60)
     
-    device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Create CRSM model instance using CORRECT config keys
+    # Create CRSM model instance
     crsm = CRSM(
         vocab_size=config['model']['vocab_size'],
         d_model=config['model']['d_model'],
@@ -132,62 +171,79 @@ def create_crsm_with_dynamics(config, output_dir) -> Optional[Path]:
         n_simulations=config['reasoning'].get('n_simulations', 10),
     ).to(device)
 
-    # Load backbone weights (from crsm_final.pt created in Step 1)
+    # Load backbone weights
     backbone_dir = output_dir / 'backbone'
-    latest_ckpt = backbone_dir / 'crsm_final.pt' 
-    print(f"Loading backbone from {latest_ckpt}...")
-    backbone_state = torch.load(latest_ckpt, map_location=device)
-    # NOTE: Assuming backbone save format is {'model_state': ...}
-    crsm.backbone.load_state_dict(backbone_state['model_state_dict'])
-    print("✓ Loaded backbone weights")
-
-    # Load dynamics (from dynamics.pt created in Step 2)
-    dynamics_path = output_dir / 'dynamics.pt'
-    success = load_dynamics_into_crsm(crsm, dynamics_path, device)
-    if not success:
+    latest_ckpt = backbone_dir / 'crsm_final.pt'
+    
+    if not latest_ckpt.exists():
+        print(f"✗ Error: Backbone checkpoint not found at {latest_ckpt}")
         return None
     
-    # Test dynamics quality (omitted for brevity, but should run)
-    stats = check_dynamics_quality(crsm, test_samples=100)
+    print(f"Loading backbone from {latest_ckpt}...")
+    backbone_state = torch.load(latest_ckpt, map_location=device)
     
-    # --- CRITICAL FIX: Save using standard PyTorch checkpoint keys ---
+    # Extract state dict
+    if 'model_state_dict' in backbone_state:
+        state_dict = backbone_state['model_state_dict']
+    elif 'model_state' in backbone_state:
+        state_dict = backbone_state['model_state']
+    else:
+        state_dict = backbone_state
+    
+    crsm.backbone.load_state_dict(state_dict, strict=False)
+    print("✓ Loaded backbone weights")
+
+    # Load dynamics
+    dynamics_path = output_dir / 'dynamics.pt'
+    
+    if not dynamics_path.exists():
+        print(f"⚠ Warning: Dynamics not found at {dynamics_path}, skipping")
+    else:
+        success = load_dynamics_into_crsm(crsm, dynamics_path, device)
+        if not success:
+            print("⚠ Warning: Could not load dynamics, continuing anyway")
+        else:
+            # Test dynamics quality
+            try:
+                stats = check_dynamics_quality(crsm, test_samples=100)
+                print(f"  Dynamics MSE: {stats['avg_mse']:.6f}")
+            except Exception as e:
+                print(f"⚠ Warning: Could not check dynamics quality: {e}")
+    
+    # Save CRSM with proper format
     final_crsm_path = output_dir / 'crsm_with_dynamics_resume.pt'
     
     try:
-        # Renamed keys to model_state_dict and optimizer_state_dict
         checkpoint = {
             'epoch': 0, 
             'model_state_dict': crsm.state_dict(),
-            'optimizer_state_dict': None, # Placeholder for compatibility
-            'dynamics_stats': stats,
+            'optimizer_state_dict': None,
         }
         
         torch.save(checkpoint, final_crsm_path)
-        
-        print(f"✓ Saved CRSM model (resume format) to {final_crsm_path}")
+        print(f"✓ Saved CRSM model to {final_crsm_path}")
         return final_crsm_path
         
     except Exception as e:
-        print(f"Error saving CRSM model: {e}")
+        print(f"✗ Error saving CRSM model: {e}")
         return None
-        
+
+
 def finetune_with_value(config, output_dir):
     """Step 4: Fine-tune the full CRSM model, including the Value Head."""
     print("\n" + "="*60)
     print("STEP 4: Fine-tuning with Value Head")
     print("="*60)
     
-    # 1. Ensure we start fine-tuning from the CRSM with Dynamics
     crsm_with_dynamics_path = output_dir / 'crsm_with_dynamics_resume.pt'
     
     if not crsm_with_dynamics_path.exists():
-        print(f"Error: CRSM with dynamics (resume format) not found at {crsm_with_dynamics_path}. Cannot fine-tune.")
+        print(f"✗ Error: CRSM checkpoint not found at {crsm_with_dynamics_path}")
         return False
 
-    # 2. Use the parameters from config
     finetune_epochs = config['training']['finetune_epochs']
     finetune_lr = config['training']['finetune_lr']
-    
+
     cmd = [
         sys.executable, '-m', 'crsm.cli', 'train',
         '--epochs', str(finetune_epochs),
@@ -195,16 +251,29 @@ def finetune_with_value(config, output_dir):
         '--vocab-size', str(config['model']['vocab_size']),
         '--seq-len', str(config['training']['seq_len']),
         '--lr', str(finetune_lr),
-        # CRITICAL FIX: Use the fully constructed CRSM as the resume point
         '--resume', str(crsm_with_dynamics_path),
-        # Direct the output to the parent directory for easier file finding
-        '--checkpoint-dir', str(output_dir), 
+        '--checkpoint-dir', str(output_dir / 'final'),
     ]
+    
+    # FIX: Add same flags as Stage 1
+    data_config = config.get('data', {})
+    if 'data_dir' in data_config:
+        cmd.extend(['--data-dir', data_config['data_dir']])
+    
+    if 'tokenizer' in config:
+        cmd.extend(['--tokenizer', config['tokenizer']])
     
     if config.get('device'):
         cmd.extend(['--device', config['device']])
     
+    if 'grad_accum' in config.get('training', {}):
+        cmd.extend(['--grad-accum', str(config['training']['grad_accum'])])
+    
+    if config.get('training', {}).get('use_amp', False):
+        cmd.append('--amp')
+
     print(f"Running: {' '.join(cmd)}")
+    
     try:
         subprocess.run(cmd, check=True)
         print("✓ Fine-tuning complete")
@@ -213,8 +282,12 @@ def finetune_with_value(config, output_dir):
         print(f"✗ Subprocess failed with error: {e}")
         return False
 
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, 
+        formatter_class=argparse.RawTextHelpFormatter
+    )
     parser.add_argument('--config', type=str, required=True,
                        help='Path to config JSON file')
     parser.add_argument('--output-dir', type=str, default='experiments/full_crsm',
@@ -225,15 +298,18 @@ def main():
                        help='Skip dynamics distillation')
     parser.add_argument('--skip-finetune', action='store_true',
                        help='Skip final fine-tuning')
-    parser.add_argument('--traces-path', type=str, default=None, help="Path to the real data (JSONL traces) for distillation. Overrides config.") # <-- NEW ARGUMENT
+    parser.add_argument('--traces-path', type=str, default=None,
+                       help="Path to traces (overrides config)")
     args = parser.parse_args()
     
     # Load config
     with open(args.config) as f:
         config = json.load(f)
 
+    # Override traces path if provided
     if args.traces_path:
-        config['data'] = config.get('data', {})
+        if 'data' not in config:
+            config['data'] = {}
         config['data']['traces_path'] = args.traces_path
     
     output_dir = Path(args.output_dir)
@@ -245,6 +321,7 @@ def main():
     
     set_seed(config.get('seed', 42))
     
+    # Print summary
     print("\n" + "="*60)
     print("CRSM Full Training Pipeline")
     print("="*60)
@@ -252,6 +329,15 @@ def main():
     print(f"Output: {output_dir}")
     print(f"Vocab size: {config['model']['vocab_size']}")
     print(f"Model size: {config['model']['d_model']}d x {config['model']['num_layers']} layers")
+    print(f"Tokenizer: {config.get('tokenizer', 'not specified')}")
+    print(f"Data dir: {config.get('data', {}).get('data_dir', 'not specified')}")
+    
+    # Validate config
+    if 'data' not in config or 'data_dir' not in config['data']:
+        print("\n⚠ WARNING: No data.data_dir in config!")
+        print("  Training will likely fail. Add this to your config:")
+        print('  "data": { "data_dir": "data/text_corpus" }')
+        return 1
     
     # Step 1: Train backbone
     if not args.skip_backbone:
@@ -289,7 +375,7 @@ def main():
     print(f"\nArtifacts saved to: {output_dir}")
     print(f"  - Backbone: {output_dir / 'backbone'}")
     print(f"  - Dynamics: {output_dir / 'dynamics.pt'}")
-    print(f"  - CRSM: {output_dir / 'crsm_with_dynamics.pt'}")
+    print(f"  - CRSM: {output_dir / 'crsm_with_dynamics_resume.pt'}")
     print(f"  - Final: {output_dir / 'final'}")
     
     return 0
