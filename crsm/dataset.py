@@ -1,6 +1,8 @@
 """
 Fixed dataset module with proper tokenizer handling.
 """
+import gc
+from collections import deque
 from typing import Iterator, Optional
 import torch
 from torch.utils.data import Dataset, IterableDataset
@@ -156,22 +158,19 @@ class StreamingTextDataset(IterableDataset):
             files = list(self.data_dir.glob('**/*.txt'))
 
         for p in files:
-            txt = p.read_text(encoding='utf-8')
-            ids = self.tokenizer.encode(txt)
-            for i in ids:
-                yield i
+            print(f"Streaming file: {p.name}")
+            with p.open(encoding='utf-8') as f:
+                for line in f:
+                    # Tokenize only the current line
+                    ids = self.tokenizer.encode(line)
+                    for i in ids:
+                        yield i
+                    # CRITICAL: Delete the temporary list and prompt GC
+                    del ids 
+                    gc.collect() # <-- ADD THIS LINE AFTER EACH LINE TOKENIZATION
 
-    def _stream_tokens_from_datasets(self):
-        # uses datasets.load_dataset in streaming mode
-        ds = load_dataset(self.dataset_name, split='train', streaming=True)
-        for item in ds:
-            # expect item to be a dict with 'text'
-            txt = item.get('text') if isinstance(item, dict) else str(item)
-            if not txt:
-                continue
-            ids = self.tokenizer.encode(txt)
-            for i in ids:
-                yield i
+            # CRITICAL: Delete file buffer and force GC after processing entire file
+            gc.collect()
 
     def token_stream(self):
         if HAS_DATASETS and self.dataset_name is not None:
@@ -180,11 +179,18 @@ class StreamingTextDataset(IterableDataset):
             yield from self._stream_tokens_from_files()
 
     def __iter__(self):
-        buf = []
+        # FIX: Replace the infinitely growing list [] with a fixed-size deque
+        # The buffer only ever holds self.seq_len tokens.
+        buf = deque(maxlen=self.seq_len) 
+
         for tok in self.token_stream():
             buf.append(tok)
-            if len(buf) >= self.seq_len:
-                seq = buf[-self.seq_len:]
+            
+            # We yield a sequence as soon as the buffer is full.
+            if len(buf) == self.seq_len:
+                # Convert deque to a list/tuple for tensor creation
+                seq = list(buf)
+                
                 inp = torch.tensor(seq[:-1], dtype=torch.long)
                 tgt = torch.tensor(seq[1:], dtype=torch.long)
                 yield inp, tgt
