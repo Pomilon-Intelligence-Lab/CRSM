@@ -110,7 +110,7 @@ def save_checkpoint(model, optimizer, epoch, path):
 
 def main(
     epochs: int = 1,
-    batch_size: int = 8,
+    batch_size: int = 0,
     vocab_size: int = 1000,
     seq_len: int = 32,
     lr: float = 1e-3,
@@ -177,11 +177,11 @@ def main(
         try:
             from torch.utils.data.distributed import DistributedSampler
             sampler = DistributedSampler(ds)
-            dl = DataLoader(ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+            dl = DataLoader(ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False)
         except Exception:
-            dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)
+            dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=False)
     else:
-        dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)
+        dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=False)
 
     model = MambaModel(vocab_size=vocab_size, d_model=128, d_state=64, d_ffn=512, num_layers=2).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
