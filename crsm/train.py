@@ -24,7 +24,7 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum_steps: int 
     total_value_loss = 0.0
     
     criterion = nn.CrossEntropyLoss(reduction='none')  # Changed to 'none' for per-token loss
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler() if use_amp else None
     step = 0
     
     for x, y in dataloader:
@@ -35,7 +35,7 @@ def train_one_epoch(model, dataloader, optimizer, device, grad_accum_steps: int 
             optimizer.zero_grad()
 
         if use_amp and scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type=device.type):
                 loss = compute_loss_with_value(model, x, y, criterion, use_value_loss)
                 loss = loss / grad_accum_steps
             scaler.scale(loss).backward()
@@ -123,7 +123,7 @@ def main(
     wandb_project: str = 'crsm',
     grad_accum_steps: int = 1,
     use_amp: bool = False,
-    num_workers: int = 0,
+    num_workers: int = 8,
     resume: str | None = None,
     distributed: bool = False,
     local_rank: int | None = None,
