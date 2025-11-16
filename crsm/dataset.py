@@ -149,15 +149,21 @@ class StreamingTextDataset(IterableDataset):
         self.dataset_name = dataset_name
 
     def _stream_tokens_from_files(self) -> Iterable[int]:
-        # iterate over files and yield token ids lazily
+        import os
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else "MAIN"
+        
         files = []
         if self.file_patterns and self.data_dir:
             for pat in self.file_patterns:
                 files.extend(self.data_dir.glob(pat))
         elif self.data_dir:
             files = list(self.data_dir.glob('**/*.txt'))
-
+        
+        print(f"[Worker {worker_id}] Found {len(files)} files")  # ← ADD THIS
+        
         for p in files:
+            print(f"[Worker {worker_id}] Streaming file: {p.name}")  # ← ADD THIS
             print(f"Streaming file: {p.name}")
             with p.open(encoding='utf-8') as f:
                 for line in f:
