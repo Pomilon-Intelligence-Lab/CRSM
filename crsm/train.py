@@ -123,7 +123,7 @@ def main(
     wandb_project: str = 'crsm',
     grad_accum_steps: int = 1,
     use_amp: bool = False,
-    num_workers: int = 3,
+    num_workers: int = 0,
     resume: str | None = None,
     distributed: bool = False,
     local_rank: int | None = None,
