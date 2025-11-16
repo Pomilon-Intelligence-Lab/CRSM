@@ -110,7 +110,7 @@ def save_checkpoint(model, optimizer, epoch, path):
 
 def main(
     epochs: int = 1,
-    batch_size: int = 0,
+    batch_size: int = 8,
     vocab_size: int = 1000,
     seq_len: int = 32,
     lr: float = 1e-3,
