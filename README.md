@@ -44,6 +44,11 @@ The CRSM architecture represents a paradigm shift from sequential token predicti
 │   ├── test_dataset_stream.py     # Dataset tests
 │   └── test_tokenizer.py          # Tokenizer tests
 ├── docs/                          # Documentation
+│   ├── ROADMAP.md                 # Development roadmap
+│   ├── synthesis.md               # Project synthesis
+│   └── research_paper.md          # Research paper draft
+├── configs/                       # Configuration files
+│   └── test_config.json           # Test configuration
 ├── examples/                      # Usage examples
 ├── setup.py                       # Package setup
 ├── requirements.txt               # Dependencies
@@ -300,13 +305,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Roadmap
 
-- [ ] Multi-GPU training (DDP)
-- [ ] Distributed training (Slurm integration)
-- [ ] Advanced reasoning modules
-- [ ] Model quantization (GPTQ, AWQ)
-- [ ] Inference optimization (vLLM integration)
-- [ ] Web UI for inference
-- [ ] Pretrained model checkpoints on Hub
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed project roadmap.
 
 ## Contact
 
@@ -321,7 +320,7 @@ For questions or issues, open a GitHub issue or reach out via email.
 Create a JSON config and run:
 
 ```bash
-python -m crsm.run --config config.json --run-dir runs/my_experiment
+python -m crsm.run --config configs/test_config.json --run-dir runs/my_experiment
 ```
 
 Notes:
