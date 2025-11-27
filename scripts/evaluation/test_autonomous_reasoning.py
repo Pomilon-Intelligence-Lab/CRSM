@@ -9,8 +9,8 @@ from pathlib import Path
 
 # ----------------------------------------------------------------------
 # FIX: Add the project root to sys.path
-# This allows the script in 'scripts/' to find the 'crsm' package.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# This allows the script in 'scripts/evaluation' to find the 'crsm' package.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(PROJECT_ROOT))
 # ----------------------------------------------------------------------
 
@@ -25,8 +25,8 @@ except ImportError as e:
     sys.exit(1)
 
 # --- Configuration ---
-MODEL_PATH = "experiments/full_crsm/crsm_with_dynamics.pt"
-CONFIG_PATH = "configs/small.json"
+MODEL_PATH = "experiments/full_crsm/crsm_with_dynamics_resume.pt"
+CONFIG_PATH = "configs/test_config.json"
 
 # --- Utility Function to Load Model Correctly ---
 

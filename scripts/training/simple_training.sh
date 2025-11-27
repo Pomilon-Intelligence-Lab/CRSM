@@ -24,7 +24,7 @@ fi
 
 # Step 1: Build vocabulary
 echo -e "\n[Step 1/6] Building vocabulary..."
-python scripts/build_vocab.py \
+python scripts/data/build_vocab.py \
     --corpus-dir "$CORPUS_DIR" \
     --vocab-size $VOCAB_SIZE \
     --output "$OUTPUT_DIR/vocab.json" \
@@ -65,7 +65,7 @@ echo "✓ Backbone training complete"
 # Step 3: Distill dynamics (if traces available)
 if [ -f "data/train_traces.jsonl" ]; then
     echo -e "\n[Step 3/6] Distilling dynamics..."
-    python scripts/distill_dynamics.py \
+    python scripts/training/distill_dynamics.py \
         --model-path "$BACKBONE_CKPT" \
         --output-path "$OUTPUT_DIR/dynamics.pt" \
         --traces-path "data/train_traces.jsonl" \
@@ -83,7 +83,7 @@ if [ -f "data/train_traces.jsonl" ]; then
     
     # Test dynamics quality
     echo -e "\n  Testing dynamics quality..."
-    python scripts/test_self_modification.py \
+    python scripts/evaluation/test_self_modification.py \
         --checkpoint "$BACKBONE_CKPT" \
         --dynamics-path "$OUTPUT_DIR/dynamics.pt" \
         --iterations 3
@@ -122,7 +122,7 @@ echo "✓ Fine-tuning complete"
 
 # Step 5: Test generation (sampling)
 echo -e "\n[Step 5/6] Testing generation (sampling)..."
-python scripts/generate_crsm.py \
+python scripts/evaluation/generate_crsm.py \
     --model-path "$FINAL_CKPT" \
     --vocab-path "$OUTPUT_DIR/vocab.json" \
     --config-path "configs/small.json" \
@@ -133,7 +133,7 @@ python scripts/generate_crsm.py \
 # Step 6: Test with MCTS (if dynamics available)
 if [ -f "$OUTPUT_DIR/dynamics.pt" ]; then
     echo -e "\n[Step 6/6] Testing generation (MCTS with dynamics)..."
-    python scripts/generate_crsm.py \
+    python scripts/evaluation/generate_crsm.py \
         --model-path "$FINAL_CKPT" \
         --vocab-path "$OUTPUT_DIR/vocab.json" \
         --dynamics-path "$OUTPUT_DIR/dynamics.pt" \
@@ -145,7 +145,7 @@ if [ -f "$OUTPUT_DIR/dynamics.pt" ]; then
     
     # Run comprehensive self-modification test
     echo -e "\n  Running self-modification verification..."
-    python scripts/test_self_modification.py \
+    python scripts/evaluation/test_self_modification.py \
         --checkpoint "$FINAL_CKPT" \
         --dynamics-path "$OUTPUT_DIR/dynamics.pt" \
         --iterations 5
@@ -167,7 +167,7 @@ echo ""
 echo "Quick test commands:"
 echo ""
 echo "# Generate with sampling:"
-echo "python scripts/generate_crsm.py \\"
+echo "python scripts/evaluation/generate_crsm.py \\"
 echo "  --model-path $FINAL_CKPT \\"
 echo "  --vocab-path $OUTPUT_DIR/vocab.json \\"
 echo "  --config-path configs/small.json \\"
@@ -176,7 +176,7 @@ echo "  --temperature 0.8"
 echo ""
 if [ -f "$OUTPUT_DIR/dynamics.pt" ]; then
     echo "# Generate with MCTS (self-modification):"
-    echo "python scripts/generate_crsm.py \\"
+    echo "python scripts/evaluation/generate_crsm.py \\"
     echo "  --model-path $FINAL_CKPT \\"
     echo "  --vocab-path $OUTPUT_DIR/vocab.json \\"
     echo "  --dynamics-path $OUTPUT_DIR/dynamics.pt \\"

@@ -62,7 +62,7 @@ python -m crsm.cli train \
 
 echo ""
 echo "Step 3: Testing dynamics distillation..."
-python scripts/distill_dynamics.py \
+python scripts/training/distill_dynamics.py \
     --model-path experiments/quickstart/backbone/crsm_epoch1.pt \
     --output-path experiments/quickstart/dynamics.pt \
     --num-samples 100 \
@@ -102,7 +102,7 @@ echo ""
 echo "All tests passed. Your CRSM installation is working correctly."
 echo ""
 echo "Next steps:"
-echo "  1. Train a real model: python scripts/train_full_crsm.py --config configs/small.json"
+echo "  1. Train a real model: python scripts/training/train_full_crsm.py --config configs/small.json"
 echo "  2. Run full test suite: pytest tests/ -v"
 echo "  3. Check the documentation: cat docs/USAGE.md"
 echo ""
