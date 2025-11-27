@@ -125,7 +125,7 @@ def distill_dynamics(config, output_dir):
         # You could add bootstrap logic here
     
     cmd = [
-        sys.executable, 'scripts/distill_dynamics.py',
+        sys.executable, 'scripts/training/distill_dynamics.py',
         '--model-path', str(backbone_path),
         '--output-path', str(dynamics_path),
         '--traces-path', traces_path,
