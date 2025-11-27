@@ -1,0 +1,33 @@
+{
+  "system": {
+    "device": "cpu"
+  },
+  "model": {
+    "d_model": 128,
+    "num_layers": 2,
+    "vocab_size": 1000,
+    "d_state": 64,
+    "d_ffn": 512
+  },
+  "training": {
+    "backbone_epochs": 1,
+    "batch_size": 2,
+    "seq_len": 32,
+    "lr": 1e-3,
+    "grad_accum": 1,
+    "finetune_epochs": 1,
+    "finetune_lr": 1e-4
+  },
+  "data": {
+    "data_dir": "data/text_corpus"
+  },
+  "dynamics": {
+    "dynamics_samples": 100,
+    "dynamics_epochs": 1,
+    "dynamics_lr": 1e-3
+  },
+  "reasoning": {
+    "c_puct": 1.0,
+    "n_simulations": 5
+  }
+}
