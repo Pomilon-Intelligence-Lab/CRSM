@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import asyncio
 import os
 import json
+import uuid
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
 
@@ -33,7 +34,9 @@ class CRSMConfig:
     temperature: float = 0.8  # NEW: Sampling temperature
     top_k: int = 50  # NEW: Top-k sampling
     top_p: float = 0.95  # NEW: Nucleus sampling
-    
+    delta_decay: float = 0.9  # NEW: Decay factor for lagged deltas
+    max_lag: int = 10  # NEW: Maximum lag to accept deltas
+
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'CRSMConfig':
         return cls(**config_dict)
@@ -54,6 +57,8 @@ class CRSMConfig:
             'temperature': self.temperature,
             'top_k': self.top_k,
             'top_p': self.top_p,
+            'delta_decay': self.delta_decay,
+            'max_lag': self.max_lag,
         }
 
 class CRSMModel(nn.Module):
@@ -115,7 +120,9 @@ class CRSM(nn.Module):
                  autonomous_mode: bool = False,
                  temperature: float = 0.8,
                  top_k: int = 50,
-                 top_p: float = 0.95):
+                 top_p: float = 0.95,
+                 delta_decay: float = 0.9,
+                 max_lag: int = 10):
         """
         Args:
             vocab_size: Size of the vocabulary
@@ -130,6 +137,8 @@ class CRSM(nn.Module):
             temperature: Sampling temperature for generation
             top_k: Top-k sampling parameter
             top_p: Nucleus sampling parameter
+            delta_decay: Decay factor for lagged deltas
+            max_lag: Maximum lag to accept deltas
         """
         super().__init__()
         
@@ -162,6 +171,8 @@ class CRSM(nn.Module):
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
+        self.delta_decay = delta_decay
+        self.max_lag = max_lag
         
         self.autonomous_mode = autonomous_mode
         self._thinking_task = None
@@ -180,6 +191,7 @@ class CRSM(nn.Module):
         self._deliberation_results = {}
         self._stop_deliberation = False
         self.state_update_queue = asyncio.Queue()
+        self.current_generation_id = None
     
     def load_dynamics(self, dynamics_path: str):
         """Load trained dynamics model."""
@@ -306,12 +318,17 @@ class CRSM(nn.Module):
         while not self._stop_deliberation:
             try:
                 # Get next deliberation request (non-blocking)
-                request = await asyncio.wait_for(
+                request_item = await asyncio.wait_for(
                     self._deliberation_requests.get(), 
                     timeout=0.1
                 )
                 
-                position, sequence = request
+                # Handle both old format (pos, seq) and new format (pos, seq, gen_id)
+                gen_id = None
+                if len(request_item) == 3:
+                    position, sequence, gen_id = request_item
+                else:
+                    position, sequence = request_item
                 
                 # Copy current state (locked)
                 async with self._state_lock:
@@ -334,7 +351,7 @@ class CRSM(nn.Module):
                 
                 # Queue state update
                 if delta is not None:
-                    await self.state_update_queue.put((position, delta))
+                    await self.state_update_queue.put((position, delta, gen_id))
                 
                 print(f"  [Deliberation] Completed for position {position}: token={action}")
                 
@@ -358,7 +375,7 @@ class CRSM(nn.Module):
     def _request_deliberation(self, position, sequence):
         """Request MCTS to deliberate on future token (non-blocking)."""
         try:
-            self._deliberation_requests.put_nowait((position, sequence))
+            self._deliberation_requests.put_nowait((position, sequence, self.current_generation_id))
         except asyncio.QueueFull:
             # Queue full, skip this request
             pass
@@ -370,12 +387,37 @@ class CRSM(nn.Module):
             return result
         return None
 
-    async def _apply_pending_deltas(self):
+    async def _apply_pending_deltas(self, current_step=None):
         """Apply state corrections from deliberation (non-blocking)."""
         try:
             while not self.state_update_queue.empty():
-                position, delta = self.state_update_queue.get_nowait()
+                item = self.state_update_queue.get_nowait()
+
+                # Handle format with/without gen_id
+                if len(item) == 3:
+                    position, delta, gen_id = item
+                else:
+                    position, delta = item
+                    gen_id = None
                 
+                # STRICT SAFETY CHECK: Discard if from different generation
+                if gen_id is not None and self.current_generation_id is not None:
+                    if gen_id != self.current_generation_id:
+                        print(f"  [State] REJECTED delta from mismatched generation ({gen_id} != {self.current_generation_id})")
+                        continue
+
+                # LAG DECAY: Decay delta based on lag
+                if current_step is not None:
+                    lag = current_step - position
+                    if lag > self.max_lag:
+                        print(f"  [State] REJECTED stale delta (lag {lag} > {self.max_lag})")
+                        continue
+                    if lag > 0:
+                        decay = self.delta_decay ** lag
+                        # Apply decay to delta list
+                        delta = [d * decay if d is not None else None for d in delta]
+                        print(f"  [State] Decayed delta by {decay:.2f} (lag {lag})")
+
                 # Apply delta to current state
                 async with self._state_lock:
                     self.apply_state_delta(delta)
@@ -398,6 +440,19 @@ class CRSM(nn.Module):
         confidence = min(1.0, total_magnitude * 10)
         return confidence
     
+    def _flush_queues(self):
+        """Clear all async queues."""
+        if self.state_update_queue:
+            while not self.state_update_queue.empty():
+                try: self.state_update_queue.get_nowait()
+                except: pass
+
+        if self._deliberation_requests:
+            while not self._deliberation_requests.empty():
+                try: self._deliberation_requests.get_nowait()
+                except: pass
+        print("✓ Flushed async queues")
+
     async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
         """
         Generate tokens with asynchronous deliberation.
@@ -414,6 +469,11 @@ class CRSM(nn.Module):
         if use_deliberation:
             self._start_background_deliberation()
         
+        # NEW: Flush queues and set generation ID
+        self._flush_queues()
+        self.current_generation_id = str(uuid.uuid4())
+        print(f"Starting generation session: {self.current_generation_id}")
+
         current_sequence = prompt.clone()
         states = self.backbone.init_state(batch_size=1, device=prompt.device)
         self.latent_state = states
@@ -459,8 +519,12 @@ class CRSM(nn.Module):
                 self.latent_state = [s.clone() if s is not None else None for s in states]
             
             # Check for state updates from deliberation
-            await self._apply_pending_deltas()
+            await self._apply_pending_deltas(current_step=step)
             
+            # Sync local states back from shared state to ensure deltas are used
+            async with self._state_lock:
+                states = [s.clone() if s is not None else None for s in self.latent_state]
+
             # ============================================
             # ASYNC: Request deliberation for future tokens
             # ============================================
