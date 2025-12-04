@@ -15,7 +15,7 @@ flowchart TB
     classDef injection fill:#d5f5e3,stroke:#27ae60,stroke-width:4px,color:black;
 
     %% Input
-    Input([Input Token $x_t$]) --> Embedding[Token Embedding]
+    Input(["Input Token x_t"]) --> Embedding[Token Embedding]
     
     subgraph Backbone ["🦁 Mamba Backbone (System 1: Fast Intuition)"]
         direction TB
@@ -41,7 +41,7 @@ flowchart TB
 
     %% Output
     Norm --> Head[Output Projection]
-    Head --> Logits([Next Token Logits])
+    Head --> Logits(["Next Token Logits"])
 
     %% The Planner
     subgraph Planner ["🧠 Asynchronous MCTS Planner (System 2: Slow Deliberation)"]
@@ -56,8 +56,8 @@ flowchart TB
         TreeSearch <-->|Rollouts| Dynamics
         TreeSearch <-->|Evaluation| ValueHead
         
-        TreeSearch -->|Best Child State| TargetState([Target State $h_{target}$]):::state
-        TreeSearch -->|Certainty| Confidence([Confidence Score]):::state
+        TreeSearch -->|Best Child State| TargetState(["Target State h_target"]):::state
+        TreeSearch -->|Certainty| Confidence(["Confidence Score"]):::state
     end
 
     %% Connections
