@@ -47,6 +47,22 @@ Linear layer projecting from hidden dimension to vocabulary:
 - Output: `[batch, seq_len, vocab_size]`
 - Logits are then passed to softmax for next-token prediction
 
+### 6. Gated State Injection (Stability Mechanism)
+
+To safely integrate the asynchronous thought vectors into the sensitive Mamba manifold, CRSM employs a **Gated Injection** mechanism rather than simple additive perturbation.
+
+The update rule is:
+$h_{new} = (1 - \alpha_{eff}) \cdot h_{old} + \alpha_{eff} \cdot h_{target}$
+
+Where:
+- $h_{target}$ is the state proposed by the MCTS planner.
+- $\alpha_{eff}$ is the effective injection rate, calculated as: `injection_rate * confidence`.
+- `confidence` is the value estimate from the MCTS root node.
+
+This ensures that:
+1.  **Stability:** The state norm remains bounded (interpolation vs addition).
+2.  **Safety:** If the planner is unsure (low confidence), the state is barely modified.
+
 ## Configuration
 
 Key hyperparameters in `CRSMConfig`:
@@ -63,6 +79,7 @@ class CRSMConfig:
     dropout: float = 0.1              # Dropout rate
     mcts_depth: int = 8               # Max MCTS tree depth
     mcts_simulations: int = 32        # Simulations per deliberation step
+    injection_rate: float = 0.05      # Gated injection rate (alpha) for state updates
     autonomy_threshold: float = 0.7   # Internal signal strength for autonomous action
 ```
 

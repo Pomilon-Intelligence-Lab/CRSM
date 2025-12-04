@@ -112,11 +112,15 @@ The MCTS process follows these steps:
 
 After running for a fixed number of simulations (`n_simulations`), the MCTS has a robust estimate of the value of each possible next action.
 
-### 3.4. The State-Delta Mechanism: The Core Innovation
+### 3.4. The State-Delta Mechanism: Gated Injection
 
-The most novel aspect of the CRSM is how it fuses the results of the MCTS deliberation back into the backbone. After completing its simulations, the MCTS does not just return the best action (token). It also computes a **state-delta (Δ)**.
+The most novel aspect of the CRSM is how it fuses the results of the MCTS deliberation back into the backbone. Early experiments showed that simple additive updates (`h + delta`) caused "state explosion," destroying the delicate recurrence manifold of the Mamba backbone.
 
-This `Δ` vector, which represents the planner's conclusion about how the model's internal state should be adjusted, is then passed to the main `CRSM` model. The model immediately applies it to its canonical `latent_state` via an element-wise addition. This creates a direct, continuous feedback loop where the deliberative reasoning process actively corrects and refines the intuitive state of the backbone model.
+To solve this, CRSM implements a **Gated Injection Mechanism**. The MCTS planner returns a **Target State** ($h_{target}$), and the backbone updates its state via interpolation:
+
+$$h_{t} \leftarrow (1 - \alpha) \cdot h_{t} + \alpha \cdot h_{target}$$
+
+Where $\alpha$ is a learned or hyperparameter-tuned **injection rate** (typically 0.05). This mechanism acts as a low-pass filter for thoughts, allowing the deliberative system to gently guide the intuitive system without overwhelming it. Furthermore, $\alpha$ is scaled dynamically by the MCTS **confidence score**, ensuring that uncertain plans have minimal impact on the model's stability.
 
 ### 3.5. The Latent Dynamics Model: A Learned World Model
 

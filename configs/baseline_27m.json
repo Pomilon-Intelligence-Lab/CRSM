@@ -1,45 +1,37 @@
 {
-  "name": "CRSM 18m VRAM-Optimized",
-
-  "model": {
-    "vocab_size": 50257,
-    "d_model": 112,
-    "d_state": 48,
-    "d_ffn": 384,
-    "num_layers": 4,
-    "dropout": 0.15
-  },
-
-  "training": {
-    "backbone_epochs": 50,
-    "finetune_epochs": 10,
-    "batch_size": 128,
-    "seq_len": 1024,
-    "lr": 5e-4,
-    "finetune_lr": 2e-4,
-    "grad_accum": 8,
-    "use_amp": true
-  },
-
-  "dynamics": {
-    "dynamics_samples": 1000,
-    "dynamics_epochs": 15,
-    "dynamics_lr": 1e-3
-  },
-
-  "reasoning": {
-    "c_puct": 1.0,
-    "n_simulations": 3
-  },
-
-  "data": { 
-    "data_dir": "data/text_corpus",
-    "traces_path": "data/train_traces.jsonl"
-  },
-
-  "tokenizer": "gpt2",
-  "seed": 42,
-  "device": "cpu",
-
-  "_comment": "Optimized for 16GB VRAM; maintains CRSM structure while preventing OOM."
+    "model": {
+        "vocab_size": 50257,
+        "d_model": 512,
+        "d_state": 64,
+        "d_ffn": 2048,
+        "num_layers": 12,
+        "dropout": 0.1
+    },
+    "reasoning": {
+        "c_puct": 1.0,
+        "n_simulations": 50,
+        "temperature": 0.8,
+        "injection_rate": 0.05
+    },
+    "training": {
+        "batch_size": 16,
+        "seq_len": 512,
+        "lr": 6e-4,
+        "backbone_epochs": 1,
+        "finetune_epochs": 1,
+        "finetune_lr": 1e-5,
+        "grad_accum": 1,
+        "use_amp": true
+    },
+    "dynamics": {
+        "dynamics_samples": 10000,
+        "dynamics_epochs": 5,
+        "dynamics_lr": 1e-3
+    },
+    "data": {
+        "data_dir": "data/text_corpus",
+        "traces_path": "data/train_traces.jsonl"
+    },
+    "tokenizer": "gpt2",
+    "seed": 42
 }

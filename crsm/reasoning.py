@@ -152,7 +152,7 @@ class AsyncDeliberationLoop:
             cur.value_sum += float(value)
             cur = cur.parent
             
-    def deliberate_sync(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor]]:
+    def deliberate_sync(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor], float]:
         """Blocking MCTS deliberation process."""
         # Prepare root state
         if state is not None:
@@ -213,16 +213,25 @@ class AsyncDeliberationLoop:
         # Select best action
         actions = list(root.children.keys())
         if not actions:
-            return 0, None
+            return 0, None, 0.0
 
         visit_counts = [root.children[a].visit_count for a in actions]
         best = actions[visit_counts.index(max(visit_counts))]
+        
+        # Get confidence from the best child's value estimate
+        best_child = root.children[best]
+        confidence = best_child.value
 
         delta = self._compute_delta_from_mcts(root, best)
-        return int(best), delta
+        return int(best), delta, confidence
     
     def _compute_delta_from_mcts(self, root: MCTSNode, best_action: int) -> Optional[List[torch.Tensor]]:
-        """Compute state delta from MCTS statistics."""
+        """
+        Compute the update target from MCTS.
+        
+        Changed: Now returns the TARGET STATE (best child state) directly,
+        rather than a difference vector, to support Gated Injection.
+        """
         if best_action not in root.children:
             return None
         
@@ -231,30 +240,25 @@ class AsyncDeliberationLoop:
         if not isinstance(root.state, list) or not isinstance(best_child.state, list):
             return None
         
-        if len(root.state) != len(best_child.state):
-            return None
-        
         try:
-            deltas = []
-            weight = min(1.0, best_child.visit_count / (root.visit_count + 1e-8))
-            
-            for parent_layer_state, child_layer_state in zip(root.state, best_child.state):
-                if parent_layer_state is None or child_layer_state is None:
-                    deltas.append(None)
+            # Return the best child's state directly
+            targets = []
+            for child_layer_state in best_child.state:
+                if child_layer_state is None:
+                    targets.append(None)
                     continue
                 
-                if not isinstance(parent_layer_state, torch.Tensor) or not isinstance(child_layer_state, torch.Tensor):
-                    deltas.append(None)
+                if not isinstance(child_layer_state, torch.Tensor):
+                    targets.append(None)
                     continue
                 
-                delta = (child_layer_state - parent_layer_state) * weight * 0.1
-                deltas.append(delta)
+                targets.append(child_layer_state)
             
-            return deltas
+            return targets
         except Exception:
             return None
 
-    async def deliberate(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor]]:
+    async def deliberate(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor], float]:
         """Async wrapper for deliberation."""
         return await asyncio.to_thread(self.deliberate_sync, seq, state)
 

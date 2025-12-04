@@ -12,6 +12,7 @@ import json
 import uuid
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
+from .logger import logger
 
 from .mamba_ssm import MambaModel
 from .reasoning import AsyncDeliberationLoop
@@ -36,6 +37,8 @@ class CRSMConfig:
     top_p: float = 0.95  # NEW: Nucleus sampling
     delta_decay: float = 0.9  # NEW: Decay factor for lagged deltas
     max_lag: int = 10  # NEW: Maximum lag to accept deltas
+    delta_scale: float = 0.1  # Deprecated in favor of injection_rate, kept for compat
+    injection_rate: float = 0.05  # NEW: Gated injection rate (alpha)
 
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'CRSMConfig':
@@ -59,6 +62,8 @@ class CRSMConfig:
             'top_p': self.top_p,
             'delta_decay': self.delta_decay,
             'max_lag': self.max_lag,
+            'delta_scale': self.delta_scale,
+            'injection_rate': self.injection_rate,
         }
 
 class CRSMModel(nn.Module):
@@ -79,6 +84,10 @@ class CRSMModel(nn.Module):
             temperature=config.temperature,
             top_k=config.top_k,
             top_p=config.top_p,
+            delta_decay=config.delta_decay,
+            max_lag=config.max_lag,
+            delta_scale=getattr(config, 'delta_scale', 0.1),
+            injection_rate=getattr(config, 'injection_rate', 0.05),
         )
 
     def load_dynamics(self, dynamics_path: str):
@@ -122,7 +131,9 @@ class CRSM(nn.Module):
                  top_k: int = 50,
                  top_p: float = 0.95,
                  delta_decay: float = 0.9,
-                 max_lag: int = 10):
+                 max_lag: int = 10,
+                 delta_scale: float = 0.1,
+                 injection_rate: float = 0.05):
         """
         Args:
             vocab_size: Size of the vocabulary
@@ -139,6 +150,8 @@ class CRSM(nn.Module):
             top_p: Nucleus sampling parameter
             delta_decay: Decay factor for lagged deltas
             max_lag: Maximum lag to accept deltas
+            delta_scale: Scaling factor (Deprecated)
+            injection_rate: Gated injection rate (alpha)
         """
         super().__init__()
         
@@ -173,6 +186,8 @@ class CRSM(nn.Module):
         self.top_p = top_p
         self.delta_decay = delta_decay
         self.max_lag = max_lag
+        self.delta_scale = delta_scale
+        self.injection_rate = injection_rate
         
         self.autonomous_mode = autonomous_mode
         self._thinking_task = None
@@ -200,17 +215,17 @@ class CRSM(nn.Module):
         
         if 'dynamics_state' in ckpt:
             self.dynamics.load_state_dict(ckpt['dynamics_state'])
-            print(f"✓ Loaded dynamics from {dynamics_path}")
+            logger.info(f"✓ Loaded dynamics from {dynamics_path}")
         elif isinstance(ckpt, dict) and all(k.startswith('net.') for k in ckpt.keys()):
             self.dynamics.load_state_dict(ckpt)
-            print(f"✓ Loaded dynamics from {dynamics_path}")
+            logger.info(f"✓ Loaded dynamics from {dynamics_path}")
         else:
-            print(f"⚠ Warning: Could not load dynamics from {dynamics_path}")
+            logger.warning(f"⚠ Warning: Could not load dynamics from {dynamics_path}")
             return False
         
         # Update reasoning module reference
         self.reasoning.dynamics_model = self.dynamics
-        print("✓ Connected dynamics to reasoning module")
+        logger.info("✓ Connected dynamics to reasoning module")
         return True
         
     def forward(self, 
@@ -233,18 +248,33 @@ class CRSM(nn.Module):
         self.latent_state = self.backbone.init_state(batch_size=batch_size, device=device)
         return self.latent_state
 
-    def apply_state_delta(self, delta):
-        """Apply a state delta produced by the deliberator to the canonical latent_state."""
+    def apply_state_delta(self, delta, scale: Optional[float] = None):
+        """
+        Apply state update from deliberation.
+        
+        NOTE: 'delta' here is now interpreted as the 'TARGET STATE' from MCTS, 
+        not a perturbation vector, when using Gated Injection.
+        
+        Formula: state = (1 - alpha) * state + alpha * target_state
+        """
         if delta is None or self.latent_state is None:
             return
+        
+        # Use configured injection rate
+        alpha = self.injection_rate
+        if scale is not None:
+            alpha = scale
+            
         try:
             if isinstance(self.latent_state, list) and isinstance(delta, list):
                 for i in range(min(len(self.latent_state), len(delta))):
                     if self.latent_state[i] is None or delta[i] is None:
                         continue
-                    self.latent_state[i] = self.latent_state[i] + delta[i]
+                    # Gated Injection: (1 - alpha) * state + alpha * target
+                    self.latent_state[i] = (1 - alpha) * self.latent_state[i] + alpha * delta[i]
             else:
-                self.latent_state = self.latent_state + delta
+                # Gated Injection
+                self.latent_state = (1 - alpha) * self.latent_state + alpha * delta
         except Exception:
             return
     
@@ -294,7 +324,7 @@ class CRSM(nn.Module):
         self._stop_deliberation = False
         
         self._deliberation_task = asyncio.create_task(self._deliberation_worker())
-        print("✓ Started background deliberation worker")
+        logger.info("✓ Started background deliberation worker")
 
     def _ensure_async_components(self):
         """Ensure async components are initialized."""
@@ -313,7 +343,7 @@ class CRSM(nn.Module):
 
     async def _deliberation_worker(self):
         """Background MCTS loop - runs continuously."""
-        print("[Deliberation Worker] Started")
+        logger.info("[Deliberation Worker] Started")
         
         while not self._stop_deliberation:
             try:
@@ -336,33 +366,32 @@ class CRSM(nn.Module):
                                 for s in self.latent_state]
                 
                 # Run MCTS (this is the slow part, but it's in background)
-                print(f"  [Deliberation] Planning for position {position}...")
+                logger.debug(f"  [Deliberation] Planning for position {position}...")
                 
                 # Run on GPU but in separate async context
-                action, delta = await asyncio.to_thread(
+                action, delta, confidence = await asyncio.to_thread(
                     self.reasoning.deliberate_sync,
                     sequence,
                     state_copy
                 )
                 
                 # Store result
-                confidence = self._compute_confidence(action, delta)
                 self._deliberation_results[position] = (action, confidence)
                 
-                # Queue state update
+                # Queue state update (Now including confidence!)
                 if delta is not None:
-                    await self.state_update_queue.put((position, delta, gen_id))
+                    await self.state_update_queue.put((position, delta, gen_id, confidence))
                 
-                print(f"  [Deliberation] Completed for position {position}: token={action}")
+                # print(f"  [Deliberation] Completed for position {position}: token={action} (conf={confidence:.2f})")
                 
             except asyncio.TimeoutError:
                 # No requests, keep looping
                 await asyncio.sleep(0.01)
             except Exception as e:
-                print(f"[Deliberation Worker] Error: {e}")
+                logger.error(f"[Deliberation Worker] Error: {e}")
                 await asyncio.sleep(0.1)
         
-        print("[Deliberation Worker] Stopped")
+        logger.info("[Deliberation Worker] Stopped")
 
     def _stop_background_deliberation(self):
         """Stop background worker."""
@@ -370,7 +399,7 @@ class CRSM(nn.Module):
         if self._deliberation_task is not None:
             self._deliberation_task.cancel()
             self._deliberation_task = None
-        print("✓ Stopped background deliberation worker")
+        logger.info("✓ Stopped background deliberation worker")
 
     def _request_deliberation(self, position, sequence):
         """Request MCTS to deliberate on future token (non-blocking)."""
@@ -393,36 +422,42 @@ class CRSM(nn.Module):
             while not self.state_update_queue.empty():
                 item = self.state_update_queue.get_nowait()
 
-                # Handle format with/without gen_id
-                if len(item) == 3:
+                # Handle format with/without gen_id and confidence
+                # Queue items can be:
+                # (pos, delta)
+                # (pos, delta, gen_id)
+                # (pos, delta, gen_id, confidence)
+                
+                gen_id = None
+                confidence = 1.0 # Default confidence if not provided
+                
+                if len(item) == 4:
+                    position, delta, gen_id, confidence = item
+                elif len(item) == 3:
                     position, delta, gen_id = item
                 else:
                     position, delta = item
-                    gen_id = None
                 
                 # STRICT SAFETY CHECK: Discard if from different generation
                 if gen_id is not None and self.current_generation_id is not None:
                     if gen_id != self.current_generation_id:
-                        print(f"  [State] REJECTED delta from mismatched generation ({gen_id} != {self.current_generation_id})")
+                        # logger.debug(f"  [State] REJECTED delta from mismatched generation ({gen_id} != {self.current_generation_id})")
                         continue
-
-                # LAG DECAY: Decay delta based on lag
-                if current_step is not None:
-                    lag = current_step - position
-                    if lag > self.max_lag:
-                        print(f"  [State] REJECTED stale delta (lag {lag} > {self.max_lag})")
-                        continue
-                    if lag > 0:
-                        decay = self.delta_decay ** lag
-                        # Apply decay to delta list
-                        delta = [d * decay if d is not None else None for d in delta]
-                        print(f"  [State] Decayed delta by {decay:.2f} (lag {lag})")
-
-                # Apply delta to current state
-                async with self._state_lock:
-                    self.apply_state_delta(delta)
                 
-                print(f"  [State] Applied delta from position {position}")
+                # =========================================================
+                # GATED INJECTION UPDATE (CONFIDENCE SCALED)
+                # =========================================================
+                
+                # Scale the injection rate by MCTS confidence.
+                # If MCTS is unsure (low value), we inject very little.
+                # effective_alpha = base_rate * confidence
+                effective_alpha = self.injection_rate * max(0.0, min(1.0, confidence))
+                
+                # Apply delta (Target State) to current state
+                async with self._state_lock:
+                    self.apply_state_delta(delta, scale=effective_alpha)
+                
+                logger.debug(f"  [State] Applied Gated Injection from pos {position} (Alpha: {effective_alpha:.4f}, Conf: {confidence:.2f})")
         except asyncio.QueueEmpty:
             pass
 
@@ -451,7 +486,7 @@ class CRSM(nn.Module):
             while not self._deliberation_requests.empty():
                 try: self._deliberation_requests.get_nowait()
                 except: pass
-        print("✓ Flushed async queues")
+        logger.info("✓ Flushed async queues")
 
     async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
         """
@@ -472,7 +507,7 @@ class CRSM(nn.Module):
         # NEW: Flush queues and set generation ID
         self._flush_queues()
         self.current_generation_id = str(uuid.uuid4())
-        print(f"Starting generation session: {self.current_generation_id}")
+        logger.info(f"Starting generation session: {self.current_generation_id}")
 
         current_sequence = prompt.clone()
         states = self.backbone.init_state(batch_size=1, device=prompt.device)
@@ -481,6 +516,15 @@ class CRSM(nn.Module):
         generated_tokens = []
         
         for step in range(max_length):
+            # ============================================
+            # ASYNC: Request deliberation (Pre-emptive)
+            # ============================================
+            if use_deliberation:
+                # If lag is 0, we want to deliberate on THIS token immediately.
+                # If lag > 0, we are pipelining for future.
+                future_position = step + deliberation_lag
+                self._request_deliberation(future_position, current_sequence.clone())
+
             # ============================================
             # FAST PATH: Generate token immediately
             # ============================================
@@ -501,11 +545,11 @@ class CRSM(nn.Module):
             if suggestion is not None:
                 # Use deliberated action
                 next_token, confidence = suggestion
-                print(f"  [MCTS] Using deliberated token {next_token} (conf: {confidence:.2f})")
+                logger.debug(f"  [MCTS] Using deliberated token {next_token} (conf: {confidence:.2f})")
             else:
                 # Fallback to sampling (instant)
                 next_token = self.sample_next_token(logits[0, -1])
-                print(f"  [Sample] Using sampled token {next_token}")
+                logger.debug(f"  [Sample] Using sampled token {next_token}")
             
             # Update sequence
             token_tensor = torch.tensor([[next_token]], device=prompt.device)
@@ -525,14 +569,6 @@ class CRSM(nn.Module):
             async with self._state_lock:
                 states = [s.clone() if s is not None else None for s in self.latent_state]
 
-            # ============================================
-            # ASYNC: Request deliberation for future tokens
-            # ============================================
-            if use_deliberation:
-                # Ask deliberation to work on token N steps ahead
-                future_position = step + deliberation_lag
-                self._request_deliberation(future_position, current_sequence.clone())
-        
         # Stop background task
         if use_deliberation:
             self._stop_background_deliberation()
@@ -564,10 +600,11 @@ class CRSM(nn.Module):
                 except Exception:
                     state_copy = self.latent_state
 
-            suggestion, delta = await self.reasoning.deliberate(None, state_copy)
+            suggestion, delta, confidence = await self.reasoning.deliberate(None, state_copy)
             if delta is not None:
+                effective_alpha = self.injection_rate * max(0.0, min(1.0, confidence))
                 async with self._state_lock:
-                    self.apply_state_delta(delta)
+                    self.apply_state_delta(delta, scale=effective_alpha)
 
             await asyncio.sleep(0.1)
             

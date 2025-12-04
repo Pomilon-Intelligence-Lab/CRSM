@@ -79,20 +79,32 @@ def compute_loss_with_value(model, x, y, criterion, use_value_loss=True):
     lm_loss_per_token = criterion(logits.reshape(b * t, v), y.reshape(b * t))
     lm_loss = lm_loss_per_token.mean()
     
-    # Value loss: train value head to predict average future loss
+    # Value loss: train value head to predict probability of correct next token
+    # Target: V = P(x_{t+1} | h_t)
     if use_value_loss and value is not None:
-        # Compute per-sequence average loss as target for value head
         with torch.no_grad():
-            # Average loss per sequence (batch,)
-            target_value = lm_loss_per_token.view(b, t).mean(dim=1)
-            # Negative because lower loss = higher value
-            target_value = -target_value
-        
+            # Calculate log probabilities from logits
+            log_probs = F.log_softmax(logits, dim=-1)
+            
+            # We focus on the last step because 'value' is returned for the last step only
+            # logits shape: (b, t, v)
+            # y shape: (b, t)
+            
+            # Last step predictions
+            last_step_log_probs = log_probs[:, -1, :]  # (b, v)
+            last_step_targets = y[:, -1]               # (b,)
+            
+            # Gather log prob of the true token
+            token_log_probs = last_step_log_probs.gather(1, last_step_targets.unsqueeze(-1)).squeeze(-1)
+            
+            # Target value is the probability (0.0 to 1.0)
+            target_value = torch.exp(token_log_probs)
+
         # Value is (batch,) from last token
         value_loss = F.mse_loss(value, target_value)
         
-        # Combined loss with value weight
-        total_loss = lm_loss + 0.1 * value_loss
+        # Combined loss with value weight (increased from 0.1 to 1.0 to ensure signal)
+        total_loss = lm_loss + 1.0 * value_loss
     else:
         total_loss = lm_loss
     

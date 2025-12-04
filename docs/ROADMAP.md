@@ -17,7 +17,11 @@ This phase involved the initial design, implementation, and debugging of the cor
 
 ## Phase 2: Initial Training and Validation (🚀 IN PROGRESS)
 
-This phase focuses on moving from a structurally complete prototype to a model that demonstrates meaningful capabilities. The primary goal is to train a baseline model on a respectable dataset and establish initial performance metrics.
+This phase focuses on moving from a structurally complete prototype to a model that demonstrates meaningful capabilities.
+
+*   **[DONE]** **Architecture Verification**: Diagnosed "State Explosion" issue and implemented **Gated State Injection** to solve it.
+*   **[DONE]** **Safety Mechanisms**: Implemented Confidence Scaling to prevent model lobotomization by untrained planners.
+*   **[DONE]** **Verification Suite**: Created `tests/test_architecture_stability.py` to prove mathematical correctness of the injection.
 
 *   **Tasks:**
     *   **1. Data Curation and Preprocessing:**
