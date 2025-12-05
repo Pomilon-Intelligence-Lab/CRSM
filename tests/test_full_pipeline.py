@@ -120,10 +120,11 @@ def test_crsm_with_dynamics():
     device = next(crsm.parameters()).device
     seq = torch.randint(0, vocab_size, (1, 10), device=device)
     states = crsm.backbone.init_state(batch_size=1, device=device)
-    
+
     # Run deliberation (should use dynamics if available)
-    action, delta = crsm.reasoning.deliberate_sync(seq, states)
+    action, delta, conf = crsm.reasoning.deliberate_sync(seq, states)
     
+    # Check results
     assert isinstance(action, int)
     # Delta might still be None if MCTS didn't expand nodes, but shouldn't crash
 

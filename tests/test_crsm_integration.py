@@ -70,23 +70,28 @@ async def test_apply_state_delta_works(small_crsm_model):
     # Store a deep copy of the original state
     initial_state = [s.clone() for s in model.latent_state]
     
-    # Create a test delta
-    test_delta = [torch.randn_like(s) * 0.1 for s in model.latent_state]
-    
+    # Create a test delta (Target State)
+    # We make the target state significantly different to measure change easily
+    target_state = [s + 1.0 for s in model.latent_state]
+
     # Act
-    model.apply_state_delta(test_delta)
-    
+    # apply_state_delta uses self.injection_rate (default 0.05)
+    # state = (1-alpha)*state + alpha*target
+    model.apply_state_delta(target_state)
+
     # Assert
+    alpha = model.injection_rate
     delta_applied = False
-    for s_init, s_after, delta in zip(initial_state, model.latent_state, test_delta):
-        # The difference should be exactly equal to the applied delta
-        diff = torch.abs(s_after - s_init).sum().item()
-        expected_diff = torch.abs(delta).sum().item()
+    for s_init, s_after, target in zip(initial_state, model.latent_state, target_state):
+        # Expected: (1-alpha)*init + alpha*target
+        expected = (1 - alpha) * s_init + alpha * target
         
-        # Use approx for floating point comparison
-        assert diff == pytest.approx(expected_diff), f"State change {diff} does not match delta {expected_diff}"
+        diff = torch.abs(s_after - expected).sum().item()
+        assert diff < 1e-5, f"State mismatch! Diff: {diff}"
         
-        if diff > 1e-6:
+        # Also verify it CHANGED from initial
+        change = torch.abs(s_after - s_init).sum().item()
+        if change > 1e-6:
             delta_applied = True
             
     assert delta_applied is True, "apply_state_delta did not modify the state"
@@ -101,9 +106,9 @@ async def test_deliberation_produces_deltas(small_crsm_model):
     
     seq = torch.randint(0, 100, (1, 8))
     states = model.backbone.init_state(batch_size=1)
-    
+
     # Act
-    action, delta = await model.reasoning.deliberate(seq, states)
+    action, delta, confidence = await model.reasoning.deliberate(seq, states)
     
     # Assert
     assert isinstance(action, int)

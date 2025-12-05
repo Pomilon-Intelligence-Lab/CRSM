@@ -80,11 +80,11 @@ def test_deliberate_sync_produces_non_none_delta(model_and_reasoning):
     seq = torch.randint(0, 100, (1, 10))
     states = model.init_state(batch_size=1)
     assert isinstance(states, list)  # Prerequisite check
-    
+
     # WHEN we run synchronous deliberation
-    action, delta = reasoning.deliberate_sync(seq, states)
-    
-    # THEN the action should be an int and delta should be a non-None list
+    action, delta, confidence = reasoning.deliberate_sync(seq, states)
+
+    # THEN we expect an integer action
     assert isinstance(action, int)
     assert delta is not None, "deliberate_sync returned a None delta"
     

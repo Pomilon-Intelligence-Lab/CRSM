@@ -13,8 +13,11 @@ def test_mcts_expansion_from_latent_state():
     latent = m.init_state(batch_size=1, device=torch.device('cpu'))
     assert isinstance(latent, list)
 
-    # Create root node with latent-state list
-    root = MCTSNode(state=latent, prior_p=1.0, children={}, parent=None)
+    # Create root node with latent-state list (using state_cache)
+    root = MCTSNode(state_cache=latent, prior_p=1.0, children={}, parent=None)
+    
+    # Verify it holds the state
+    assert root.state_cache is latent
 
     # Get policy logits and value from latent states
     logits, value, _ = m.predict_from_states(latent)
@@ -28,10 +31,13 @@ def test_mcts_expansion_from_latent_state():
     # At least one child should have per-layer state list and differ from parent
     some_diff = False
     for action, child in root.children.items():
-        assert isinstance(child.state, list)
+        # Reconstruct state
+        child_state = loop._reconstruct_state(child, latent)
+        assert isinstance(child_state, list)
+        
         # compare each layer: at least one layer must change
         diffs = 0
-        for p_layer, c_layer in zip(latent, child.state):
+        for p_layer, c_layer in zip(latent, child_state):
             if p_layer is None or c_layer is None:
                 continue
             # shapes must match
