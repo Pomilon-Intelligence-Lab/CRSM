@@ -72,7 +72,7 @@ Key hyperparameters in `CRSMConfig`:
 ```python
 @dataclass
 class CRSMConfig:
-    vocab_size: int = 32000           # Vocabulary size
+    vocab_size: int = 50257           # Vocabulary size
     hidden_size: int = 2048           # Model hidden dimension (continuous state size)
     intermediate_size: int = 8192     # FFN intermediate dimension
     num_hidden_layers: int = 24       # Number of Mamba SSM layers
