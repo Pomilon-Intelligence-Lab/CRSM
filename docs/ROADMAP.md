@@ -25,8 +25,8 @@ This phase focuses on moving from a structurally complete prototype to a model t
 
 *   **Tasks:**
     *   **1. Data Curation and Preprocessing:**
-        *   **[IN PROGRESS]** Expand the training corpus beyond the initial small text files.
-        *   **[TODO]** Download and preprocess a standard dataset (e.g., a subset of WikiText, SlimPajama, or C4).
+        *   **[DONE]** Expand the training corpus beyond the initial small text files.
+        *   **[DONE]** Download and preprocess a standard dataset (WikiText-103 via `scripts/setup/download_data.py`).
         *   **[TODO]** Implement a robust vocabulary generation process with a larger vocabulary size (e.g., 8,000-16,000 tokens) to ensure good coverage of the training data.
     *   **2. Baseline Model Training:**
         *   **[TODO]** Execute the full four-stage training pipeline on the newly curated dataset.

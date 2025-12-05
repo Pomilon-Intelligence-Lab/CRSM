@@ -34,7 +34,18 @@ print(output)
 ## Training
 
 ### 1. Prepare Data
-Ensure you have a text corpus in `data/text_corpus`.
+
+Before training, you need a text corpus. We provide a script to download and preprocess the WikiText-103 dataset:
+
+```bash
+# Install the datasets library if you haven't
+pip install datasets
+
+# Download and prepare the data
+python scripts/setup/download_data.py --output_dir data/text_corpus
+```
+
+This will create a `data/text_corpus/wikitext_train.txt` file ready for training.
 
 ### 2. Train Backbone
 ```bash
