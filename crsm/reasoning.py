@@ -14,10 +14,11 @@ import numpy as np
 
 @dataclass
 class MCTSNode:
-    state: torch.Tensor
     prior_p: float
     children: Dict[int, 'MCTSNode']
     parent: Optional['MCTSNode']
+    action: Optional[int] = None  # The action that led to this node
+    state_cache: Optional[List[torch.Tensor]] = None # Cached state (list of tensors)
     visit_count: int = 0
     value_sum: float = 0.0
     
@@ -51,6 +52,31 @@ class AsyncDeliberationLoop:
         self.use_sampling = True
         self.temperature = 0.8
         
+    def _reconstruct_state(self, node: MCTSNode, root_state: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        Reconstructs the state of a node by replaying dynamics from the nearest cached ancestor.
+        Solves the 'Memory Wall' by trading compute for VRAM.
+        """
+        # 1. Find path to nearest cached state
+        path = []
+        curr = node
+        while curr.state_cache is None and curr.parent is not None:
+            path.append(curr.action)
+            curr = curr.parent
+        
+        # Base state (from cache or root)
+        state = curr.state_cache if curr.state_cache is not None else root_state
+        
+        # 2. Replay dynamics forward
+        # path is reversed (leaf -> root), so reverse it back
+        for action in reversed(path):
+            state = self._get_next_state(state, action)
+            
+        # 3. Optional: Cache this state if it's deep in the tree or frequently visited
+        # For now, we only cache if it's the node we asked for (to save this computation for children)
+        node.state_cache = state
+        return state
+
     def select_action(self, node: MCTSNode) -> Tuple[MCTSNode, List[int]]:
         """Select the most promising action using PUCT algorithm"""
         path = []
@@ -87,12 +113,14 @@ class AsyncDeliberationLoop:
         for p, a in zip(topv.tolist(), topi.tolist()):
             if p <= 0:
                 continue
-            next_state = self._get_next_state(node.state, int(a))
+            # Memory Wall Fix: Do NOT compute or store next_state here.
+            # Just store the action. State is reconstructed on demand.
             child = MCTSNode(
-                state=next_state,
                 prior_p=float(p),
                 children={},
-                parent=node
+                parent=node,
+                action=int(a),
+                state_cache=None # Lazy
             )
             node.children[int(a)] = child
                 
@@ -179,34 +207,38 @@ class AsyncDeliberationLoop:
         else:
             root_state = torch.tensor([], device=next(self.model.parameters()).device)
 
-        root = MCTSNode(state=root_state, prior_p=1.0, children={}, parent=None)
+        # Root node always has the state cached
+        root = MCTSNode(prior_p=1.0, children={}, parent=None, action=None, state_cache=root_state)
 
         # Initial expansion
         use_latent = state is not None
         device = next(self.model.parameters()).device
         with torch.no_grad():
             if use_latent:
-                logits, value, _ = self.model.predict_from_states(state)
+                logits, value, _ = self.model.predict_from_states(root_state)
             else:
-                logits, value, _ = self.model.predict_policy_value(root.state.unsqueeze(0))
+                logits, value, _ = self.model.predict_policy_value(root_state.unsqueeze(0))
         last_logits = logits[0, -1]
         self.expand_node(root, last_logits, float(value.item()) if hasattr(value, 'item') else float(value))
 
         # Run simulations
         for _ in range(self.n_simulations):
             leaf, path = self.select_action(root)
+            
+            # Reconstruct state for the leaf node (O(depth) compute, O(1) memory)
+            leaf_state = self._reconstruct_state(leaf, root_state)
 
             if not leaf.expanded():
                 with torch.no_grad():
                     if use_latent:
-                        logits, value, _ = self.model.predict_from_states(state)
+                        logits, value, _ = self.model.predict_from_states(leaf_state)
                     else:
-                        logits, value, _ = self.model.predict_policy_value(leaf.state.unsqueeze(0))
+                        logits, value, _ = self.model.predict_policy_value(leaf_state.unsqueeze(0))
                 last_logits = logits[0, -1]
                 self.expand_node(leaf, last_logits, float(value.item()) if hasattr(value, 'item') else float(value))
                 rollout_value = float(value.item()) if hasattr(value, 'item') else float(value)
             else:
-                rollout_value = self._rollout_value(leaf)
+                rollout_value = self._rollout_value(leaf_state)
 
             self.backpropagate(leaf, rollout_value, path)
 
@@ -228,22 +260,27 @@ class AsyncDeliberationLoop:
     def _compute_delta_from_mcts(self, root: MCTSNode, best_action: int) -> Optional[List[torch.Tensor]]:
         """
         Compute the update target from MCTS.
-        
-        Changed: Now returns the TARGET STATE (best child state) directly,
-        rather than a difference vector, to support Gated Injection.
         """
         if best_action not in root.children:
             return None
         
         best_child = root.children[best_action]
         
-        if not isinstance(root.state, list) or not isinstance(best_child.state, list):
+        # Memory Wall Fix: Reconstruct states on demand
+        # Root must have state_cache
+        if root.state_cache is None:
+            return None
+            
+        root_state = root.state_cache
+        child_state = self._reconstruct_state(best_child, root_state)
+        
+        if not isinstance(root_state, list) or not isinstance(child_state, list):
             return None
         
         try:
             # Return the best child's state directly
             targets = []
-            for child_layer_state in best_child.state:
+            for child_layer_state in child_state:
                 if child_layer_state is None:
                     targets.append(None)
                     continue
@@ -262,13 +299,14 @@ class AsyncDeliberationLoop:
         """Async wrapper for deliberation."""
         return await asyncio.to_thread(self.deliberate_sync, seq, state)
 
-    def _rollout_value(self, node: MCTSNode) -> float:
+    def _rollout_value(self, state: List[torch.Tensor]) -> float:
         """Improved rollout with optional sampling."""
-        state = node.state
+        # state passed in is already reconstructed
         device = next(self.model.parameters()).device
         
         try:
-            is_token_seq = state.dtype in (torch.long, torch.int)
+            # Check if it's a token seq (tensor) or latent state (list)
+            is_token_seq = isinstance(state, torch.Tensor) and state.dtype in (torch.long, torch.int)
         except Exception:
             is_token_seq = False
 
