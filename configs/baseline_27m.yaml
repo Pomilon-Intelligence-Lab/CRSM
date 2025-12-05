@@ -1,0 +1,35 @@
+model:
+  vocab_size: 50257
+  d_model: 512
+  d_state: 64
+  d_ffn: 2048
+  num_layers: 8
+  dropout: 0.1
+
+reasoning:
+  c_puct: 1.0
+  n_simulations: 25
+  temperature: 0.8
+  injection_rate: 0.05
+
+training:
+  batch_size: 32
+  seq_len: 512
+  lr: 6e-4
+  backbone_epochs: 2
+  finetune_epochs: 2
+  finetune_lr: 2e-5
+  grad_accum: 1
+  use_amp: true
+
+dynamics:
+  dynamics_samples: 10000
+  dynamics_epochs: 10
+  dynamics_lr: 1e-3
+
+data:
+  data_dir: "data/text_corpus"
+  traces_path: "data/train_traces.jsonl"
+
+tokenizer: "gpt2"
+seed: 42

@@ -1,0 +1,43 @@
+model:
+  vocab_size: 1000
+  d_model: 128
+  d_state: 64
+  d_ffn: 512
+  num_layers: 2
+  dropout: 0.1
+
+reasoning:
+  c_puct: 1.0
+  n_simulations: 10
+  temperature: 1.0
+  injection_rate: 0.1
+
+training:
+  batch_size: 8
+  seq_len: 32
+  lr: 1e-3
+  backbone_epochs: 2
+  finetune_epochs: 2
+  finetune_lr: 1e-4
+  grad_accum: 1
+  use_amp: false
+  value_training:
+    rollouts_per_prompt: 4
+    epochs: 2
+    lr: 1e-4
+
+dynamics:
+  dynamics_samples: 100
+  dynamics_epochs: 2
+  dynamics_lr: 1e-3
+
+data:
+  data_dir: "data/text_corpus"
+  traces_path: "data/train_traces.jsonl"
+
+tokenizer: null
+seed: 42
+
+system:
+  device: "cpu"
+  seed: 42

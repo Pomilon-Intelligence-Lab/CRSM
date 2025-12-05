@@ -141,6 +141,10 @@ def main(
     local_rank: int | None = None,
     use_value_loss: bool = True,
     hf_tokenizer_name: str | None = None,  # NEW: Add tokenizer parameter
+    d_model: int = 128,
+    d_state: int = 64,
+    d_ffn: int = 512,
+    num_layers: int = 2
 ):
     set_seed(seed)
 
@@ -195,7 +199,7 @@ def main(
     else:
         dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=False)
 
-    model = MambaModel(vocab_size=vocab_size, d_model=128, d_state=64, d_ffn=512, num_layers=2).to(device)
+    model = MambaModel(vocab_size=vocab_size, d_model=d_model, d_state=d_state, d_ffn=d_ffn, num_layers=num_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     if distributed and local_rank is not None:

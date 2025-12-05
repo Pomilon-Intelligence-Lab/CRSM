@@ -27,6 +27,10 @@ def main():
     train_p.add_argument('--local-rank', type=int, default=None, help='Local rank supplied by launcher')
     train_p.add_argument('--no-value-loss', action='store_true', help='Disable value head training')
     train_p.add_argument('--tokenizer', type=str, default=None, help='HuggingFace tokenizer name (e.g., gpt2)')
+    train_p.add_argument('--d-model', type=int, default=256)
+    train_p.add_argument('--d-state', type=int, default=128)
+    train_p.add_argument('--d-ffn', type=int, default=1024)
+    train_p.add_argument('--num-layers', type=int, default=4)
 
     args = parser.parse_args()
     if args.cmd == 'train':
@@ -49,7 +53,11 @@ def main():
             distributed=args.distributed,
             local_rank=args.local_rank,
             use_value_loss=(not args.no_value_loss),
-            hf_tokenizer_name=args.tokenizer
+            hf_tokenizer_name=args.tokenizer,
+            d_model=args.d_model,
+            d_state=args.d_state,
+            d_ffn=args.d_ffn,
+            num_layers=args.num_layers
         )
     else:
         parser.print_help()
