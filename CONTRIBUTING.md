@@ -1,38 +1,43 @@
 # Contributing to CRSM
 
-Thank you for your interest in contributing to CRSM! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to the **Continuous Reasoning State Model (CRSM)**.
+
+Please note that this repositoryand the "Pomilon Intelligence Lab" organizationserves as a personal experimentation ground for hybrid AI architectures. It is currently a solo project maintained by **@Pomilon**. While this is not a formal research institution, the goal is to maintain high-quality, reproducible, and experimental code.
+
+Contributions that help stabilize the architecture, improve performance, or clarify documentation are very welcome.
 
 ## Code of Conduct
 
-- Be respectful and inclusive
-- Welcome diverse perspectives
-- Focus on constructive feedback
-- Keep discussions professional
+  * **Respect:** Treat everyone with respect.
+  * **Constructive Feedback:** Keep discussions focused on technical improvements.
+  * **Experimental Context:** Acknowledge that this is active, experimental software. Breaking changes and instability are part of the process.
 
 ## Getting Started
 
-1. **Fork the repository** on GitHub
-2. **Clone your fork** locally:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/CRSM.git
-   cd CRSM
-   ```
-3. **Create a new branch** for your feature:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
+1.  **Fork the repository** on GitHub.
+2.  **Clone your fork** locally:
+```bash
+git clone https://github.com/Pomilon-Intelligence-Lab/CRSM.git
+cd CRSM
+```
+3.  **Create a new branch** for your feature:
+```bash
+git checkout -b feature/your-feature-name
+```
 
 ## Development Setup
+
+**Note:** CRSM has specific dependencies regarding CUDA versions due to the Mamba backbone.
 
 ```bash
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate
 
-# Install in development mode
+# Install in development mode (includes testing tools)
 pip install -e ".[dev]"
 
-# Install pre-commit hooks
+# Install pre-commit hooks for auto-formatting
 pip install pre-commit
 pre-commit install
 ```
@@ -41,44 +46,42 @@ pre-commit install
 
 ### Code Style
 
-- Follow PEP 8
-- Use type hints where possible
-- Max line length: 100 characters
-- Use meaningful variable names
+To keep this project maintainable, strict adherence to code style is required:
 
-Format code with:
+  * **Python:** Follow PEP 8 guidelines.
+  * **Typing:** Strict type hints (`typing.List`, `torch.Tensor`, etc.) are mandatory. This is critical for managing the complex state within the MCTS planner.
+  * **Async:** The Planner executes asynchronously. Avoid blocking the main thread; heavy computation should be offloaded or batched appropriately.
+
+**Format code before committing:**
+
 ```bash
-black crsm/ tests/ examples/
-isort crsm/ tests/ examples/
+black crsm/ tests/
+isort crsm/ tests/
 ```
 
-Check with:
+**Check for linting errors:**
+
 ```bash
 flake8 crsm/ tests/
 ```
 
 ### Commit Messages
 
-Write clear, descriptive commit messages:
+Please write clear, descriptive commit messages:
 
 ```
 Short summary (50 chars or less)
 
 More detailed explanation if needed, wrapped at 72 characters.
-Explain what changed and why, not how.
+Explain what changed and why.
 
 - Use bullet points for multiple changes
 - Reference issues with "Fixes #123"
 ```
 
-Examples:
-```
-Add efficient S4 layer implementation
-Refactor dataset loading for streaming support
-Fix CUDA memory leak in training loop
-```
-
 ## Testing
+
+Testing CRSM requires attention to the asynchronous planner loop.
 
 ### Running Tests
 
@@ -87,173 +90,67 @@ Fix CUDA memory leak in training loop
 pytest tests/ -v
 
 # Run specific test file
-pytest tests/test_crsm.py
-
-# Run with coverage
-pytest tests/ --cov=crsm --cov-report=html
+pytest tests/test_architecture_stability.py
 ```
 
 ### Writing Tests
 
-- Place new tests in `tests/`
-- Use descriptive test function names: `test_module_functionality`
-- Include docstrings explaining what's tested
-- Test both success and failure cases
-
-Example:
-```python
-def test_crsm_config_initialization():
-    """Test that CRSMConfig initializes with correct defaults."""
-    config = CRSMConfig()
-    assert config.vocab_size == 32000
-    assert config.hidden_size == 2048
-    assert config.num_hidden_layers == 24
-
-def test_model_forward_shape():
-    """Test that model forward pass produces correct output shape."""
-    config = CRSMConfig(vocab_size=1000, hidden_size=256)
-    model = CRSMModel(config)
-    
-    input_ids = torch.randint(0, 1000, (2, 128))
-    logits, states = model(input_ids)
-    
-    assert logits.shape == (2, 128, 1000)
-```
+  * **Location:** Place new tests in `tests/`.
+  * **Async:** Ensure `pytest.mark.asyncio` is used for planner logic.
+  * **Mocking:** You **must** mock the large Mamba backbone when testing MCTS logic. Loading full model weights for unit tests is inefficient.
 
 ## Pull Request Process
 
-1. **Sync with main** before starting work:
-   ```bash
-   git fetch origin
-   git rebase origin/main
-   ```
+1.  **Sync with main** before starting work to avoid conflicts:
 
-2. **Push your branch**:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
+    ```bash
+    git fetch origin
+    git rebase origin/main
+    ```
 
-3. **Create Pull Request** on GitHub with:
-   - Clear title describing the change
-   - Detailed description of what and why
-   - Reference to related issues (if any)
-   - Screenshots or examples (if applicable)
+2.  **Push your branch**:
 
-4. **PR Template**:
-   ```markdown
-   ## Description
-   Brief description of the changes.
-   
-   ## Type of Change
-   - [ ] Bug fix
-   - [ ] New feature
-   - [ ] Documentation update
-   - [ ] Performance improvement
-   
-   ## Testing
-   How to test these changes?
-   
-   ## Checklist
-   - [ ] Tests pass locally
-   - [ ] Code follows style guidelines
-   - [ ] Documentation is updated
-   - [ ] Commit messages are descriptive
-   
-   ## Related Issues
-   Fixes #123
-   ```
+    ```bash
+    git push origin feature/your-feature-name
+    ```
 
-5. **Wait for review** - Maintainers will review and request changes if needed
+3.  **Create a Pull Request** using the template below:
+
+```markdown
+## Description
+Brief description of the changes.
+
+## Type of Change
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Documentation update
+- [ ] Performance improvement
+
+## Verification
+- [ ] Tests pass locally (`pytest`)
+- [ ] Code follows style guidelines (`black`, `flake8`)
+```
 
 ## Areas for Contribution
 
+Since this is a solo project, assistance in the following areas is particularly helpful:
+
 ### High Priority
 
-1. **Performance Optimization**
-   - Optimize S4/Mamba kernels
-   - Reduce memory usage
-   - Improve training throughput
-
-2. **Testing**
-   - Add integration tests
-   - Add edge case tests
-   - Add benchmark tests
-
-3. **Documentation**
-   - Add tutorials
-   - Improve API docs
-   - Add architecture explanations
+1.  **Planner Optimization (C++/Rust):** The current Python `asyncio` planner encounters GIL contention. Porting the MCTS logic to a compiled extension is a primary goal.
+2.  **MCTS Visualization:** Development of tools to visualize the "Tree of Thoughts" generated during inference for debugging.
+3.  **Kernel Optimization:** Optimizing the Gated Injection mechanism (custom CUDA kernel) to reduce memory overhead.
 
 ### Medium Priority
 
-4. **Features**
-   - Distillation loss implementation
-   - Multi-GPU training (DDP)
-   - Quantization support
-   - Export formats (ONNX, etc.)
-
-5. **Examples**
-   - Add more example scripts
-   - Create Jupyter notebook tutorials
-   - Add deployment examples
-
-### Lower Priority
-
-6. **Quality of Life**
-   - Better error messages
-   - CLI improvements
-   - Configuration management
-   - Logging improvements
-
-## Documentation
-
-- Keep docs in `docs/` folder
-- Use Markdown format
-- Update README.md for major changes
-- Add docstrings to all public functions
-
-```python
-def function_name(arg1: str, arg2: int) -> bool:
-    """
-    Brief description of what the function does.
-    
-    Args:
-        arg1: Description of arg1
-        arg2: Description of arg2
-    
-    Returns:
-        Description of return value
-    
-    Example:
-        >>> result = function_name("hello", 42)
-        >>> print(result)
-        True
-    """
-    pass
-```
-
-## Release Process
-
-Releases follow semantic versioning (MAJOR.MINOR.PATCH):
-
-- **MAJOR**: Breaking changes
-- **MINOR**: New features (backward compatible)
-- **PATCH**: Bug fixes
-
-Steps for maintainers:
-1. Update version in `setup.py`
-2. Update `CHANGELOG.md`
-3. Create tag: `git tag v0.1.0`
-4. Push tag: `git push origin v0.1.0`
-5. Build and upload to PyPI
+4.  **Documentation:** Technical tutorials on interpreting "State Deltas."
+5.  **Benchmarks:** Scripts to evaluate CRSM on standard reasoning benchmarks (GSM8K, ARC).
+6.  **Distillation Pipeline:** Improving the stability of the Dynamics Model training loop.
 
 ## Questions?
 
-- Check existing issues and discussions
-- Open a new discussion for questions
-- Open an issue for bugs
-- Contact maintainers via email
+  * **Technical Issues:** Open an Issue on GitHub.
+  * **Architecture Discussion:** Open a GitHub Discussion.
+  * **Contact:** Reach out to **@Pomilon**.
 
-## Thank You!
-
-Your contributions help make CRSM better for everyone. We appreciate your time and effort!
+Thank you for helping push this experiment forward.
