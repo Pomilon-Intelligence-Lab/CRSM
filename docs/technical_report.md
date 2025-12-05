@@ -38,9 +38,15 @@ This acts effectively as a low-pass filter for reasoning signals. The planner ge
 ## 4. Current Status
 *   **Stability:** Verified via stress tests (1000+ continuous injections). The Gated Injection mechanism successfully maintains numerical stability.
 *   **Safety:** A "Confidence Scaling" mechanism ensures that if the planner's Value Head is uncertain, the injection rate ($\alpha$) drops to zero, preventing the planner from degrading the backbone's performance.
-*   **Validation:** Preliminary tests verify that *if* the planner identifies a state with lower expected loss, the injection mechanism successfully steers the generation towards it.
+*   **Validation:** Preliminary tests verify that *if* the planner identifies a state with lower expected loss, the injection mechanism successfully steers the generation towards it. **Note: The net positive impact on downstream reasoning tasks is currently theoretical and awaits large-scale training (Phase 4 of Roadmap).**
 
-## 5. Current Constraints & Challenges
+## 5. Inspirations & Parallels
+This architecture draws heavily from existing research:
+*   **Representation Engineering (RepE):** The idea of steering generation via latent space manipulation.
+*   **MuZero & AlphaLLM:** The application of MCTS to latent states and language models.
+*   **Polyak Averaging:** The mathematical basis for the stable "soft update" injection.
+
+## 6. Current Constraints & Challenges
 While the architecture functions, several practical bottlenecks remain:
 
 1.  **Global Interpreter Lock (GIL):** The implementation uses Python's `asyncio`, which is not truly parallel due to the GIL. This causes minor stuttering in generation when the planner is under heavy load. A robust implementation would require the planner to be implemented in C++ or Rust.

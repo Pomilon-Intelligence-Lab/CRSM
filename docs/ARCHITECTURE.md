@@ -49,6 +49,8 @@ Linear layer projecting from hidden dimension to vocabulary:
 
 ### 6. Gated State Injection (Stability Mechanism)
 
+**Note:** The primary innovation of CRSM is the **asynchronous interaction loop** between the System 1 backbone and the System 2 planner. The Gated Injection formula below is simply the stabilizing mechanism that makes this loop mathematically viable on a continuous manifold.
+
 To safely integrate the asynchronous thought vectors into the sensitive Mamba manifold, CRSM employs a **Gated Injection** mechanism rather than simple additive perturbation.
 
 The update rule is:
@@ -202,4 +204,7 @@ Expected throughput (on A100):
 
 - **S4**: [Efficiently Modeling Long Sequences with Structured State Spaces](https://arxiv.org/abs/2111.00396)
 - **Mamba**: [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://arxiv.org/abs/2312.08956)
+- **MuZero**: [Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model](https://arxiv.org/abs/1911.08265)
+- **RepE**: [Representation Engineering: A Top-Down Approach to AI Transparency](https://arxiv.org/abs/2310.01405)
+- **AlphaLLM**: [AlphaLLM: Monte Carlo Tree Search with Large Language Models](https://arxiv.org/abs/2404.05584)
 - **Scaling Laws**: [Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)

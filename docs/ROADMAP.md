@@ -17,7 +17,7 @@ This phase involved the initial design, implementation, and debugging of the cor
 
 ## Phase 2: Initial Training and Validation (🚀 IN PROGRESS)
 
-This phase focuses on moving from a structurally complete prototype to a model that demonstrates meaningful capabilities.
+This phase focuses on moving from a structurally complete prototype to a model that demonstrates meaningful capabilities. **Note: At this stage, the performance benefits of the MCTS planner are theoretical. Empirical validation requires the large-scale training scheduled for Phase 4.**
 
 *   **[DONE]** **Architecture Verification**: Diagnosed "State Explosion" issue and implemented **Gated State Injection** to solve it.
 *   **[DONE]** **Safety Mechanisms**: Implemented Confidence Scaling to prevent model lobotomization by untrained planners.
