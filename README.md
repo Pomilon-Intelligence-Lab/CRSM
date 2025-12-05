@@ -17,7 +17,7 @@ Navigate the detailed documentation to understand the system:
 
 *   **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: Detailed breakdown of the components (Backbone, Dynamics, Planner) and the Gated Injection math.
 *   **[Visual Architecture Diagram](docs/ARCHITECTURE_DIAGRAM.md)**: A schematic view of the "System 1" (Fast) and "System 2" (Slow) interaction.
-*   **[Research Paper](docs/research_paper.md)**: The theoretical framework, motivations, and design philosophy behind CRSM.
+*   **[Technical Report](docs/technical_report.md)**: An informal deep dive into the idea, the implementation, and the lessons learned.
 *   **[Usage & Training Guide](docs/USAGE.md)**: Practical instructions for running inference, training the backbone, and fine-tuning the value head.
 *   **[Installation Guide](docs/INSTALL.md)**: Detailed environment setup and dependency management.
 *   **[Project Roadmap](docs/ROADMAP.md)**: Current status, completed milestones, and future research directions.
