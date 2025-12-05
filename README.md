@@ -50,6 +50,8 @@ pip install -e .
 
 ### Autonomous Inference
 
+> **Note:** This repository contains the architecture and training code. Pre-trained weights are not yet available (see Roadmap). Running inference now will use an untrained model with random weights, producing random tokens.
+
 Run the model with the "Thinking" loop active:
 
 ```python

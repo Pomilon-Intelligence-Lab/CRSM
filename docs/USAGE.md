@@ -8,9 +8,9 @@ cd CRSM
 pip install -e .
 ```
 
-## Quick Start: Inference
+## 🚀 Quick Start: Autonomous Inference
 
-To run the model in autonomous mode (with MCTS on):
+> **Note:** Pre-trained weights are not yet available. The code below will run with an initialized (random) model for testing purposes.
 
 ```python
 import torch
