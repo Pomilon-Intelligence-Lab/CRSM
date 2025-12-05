@@ -11,7 +11,7 @@
 ## Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/pomilon/CRSM.git
+git clone https://github.com/Pomilon-Intelligence-Lab/CRSM.git
 cd CRSM
 ```
 
