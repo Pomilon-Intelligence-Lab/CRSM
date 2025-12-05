@@ -37,7 +37,7 @@ This phase focuses on moving from a structurally complete prototype to a model t
         *   **[TODO]** Use the `generate_crsm.py` script to generate text samples and qualitatively assess coherence and reasoning.
         *   **[TODO]** Perform an ablation study by running generation with and without MCTS (`--use-mcts` flag) to get a preliminary measure of the impact of the reasoning module.
     *   **4. Secure Compute Resources:**
-        *   **[TODO]** Draft and submit a compute grant proposal to `fal.ai`, using the project's GitHub repository and successful prototype validation as evidence.
+        *   **[TODO]** Draft and submit a compute grant proposal, using the project's GitHub repository and successful prototype validation as evidence.
 
 *   **Exit Criteria:**
     *   A baseline CRSM model is successfully trained on a standard dataset.
