@@ -76,6 +76,9 @@ This phase focuses on scaling the model and performing rigorous, comparative ben
             *   A baseline Mamba model of the same size (MCTS disabled).
             *   A standard Transformer model of a similar size.
         *   **[TODO]** Measure and compare latency, throughput, and computational cost for generation.
+    *   **3. Inference Optimization (C++/Rust):**
+        *   **[TODO]** Port the MCTS Planner logic to C++ (LibTorch) or Rust to bypass the Python GIL.
+        *   **[TODO]** Implement true parallel execution where "System 2" does not block "System 1" generation.
 
 *   **Exit Criteria:**
     *   A large-scale CRSM model is successfully trained.
