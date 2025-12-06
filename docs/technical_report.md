@@ -35,23 +35,36 @@ $$h_{new} = (1 - \alpha) \cdot h_{old} + \alpha \cdot h_{target}$$
 
 This acts effectively as a low-pass filter for reasoning signals. The planner gently "nudges" the model's intuition towards a higher-value state. This preserves the manifold stability of the original backbone while still allowing for corrective guidance.
 
-## 4. Current Status
+## 4. Engineering The Training Pipeline
+
+To enable scalable training without memory bottlenecks, we engineered a modular 4-stage pipeline:
+
+1.  **System 1 Training (Backbone):** Standard causal language modeling on the Mamba backbone.
+2.  **Subconscious Distillation (Dynamics):** A "dreaming" phase where a lightweight MLP learns to predict the backbone's state transitions ($h_t \rightarrow h_{t+1}$). This allows the planner to simulate thousands of steps without invoking the heavy backbone.
+3.  **Judgment Training (Value Head):** An "offline expert iteration" phase. The frozen system generates rollouts (both deliberated and random), and the Value Head is trained to predict the eventual outcome, effectively learning to recognize "good" thoughts.
+4.  **Assembly:** The final integration of components into a deployable artifact.
+
+**Data Efficiency:**
+To handle large-scale corpora (like FineWeb-Edu), we implemented a custom `PretokenizedDataset` that streams `uint16` binary files using memory mapping (`numpy.memmap`). This allows training on terabytes of text with minimal RAM usage and zero tokenization overhead during the training loop.
+
+## 5. Current Status
+*   **Infrastructure:** The full 4-stage training pipeline is implemented and verified on synthetic data.
 *   **Stability:** Verified via stress tests (1000+ continuous injections). The Gated Injection mechanism successfully maintains numerical stability.
 *   **Safety:** A "Confidence Scaling" mechanism ensures that if the planner's Value Head is uncertain, the injection rate ($\alpha$) drops to zero, preventing the planner from degrading the backbone's performance.
 *   **Validation:** Preliminary tests verify that *if* the planner identifies a state with lower expected loss, the injection mechanism successfully steers the generation towards it. **Note: The net positive impact on downstream reasoning tasks is currently theoretical and awaits large-scale training (Phase 4 of Roadmap).**
 
-## 5. Inspirations & Parallels
+## 6. Inspirations & Parallels
 This architecture draws heavily from existing research:
 *   **Representation Engineering (RepE):** The idea of steering generation via latent space manipulation.
 *   **MuZero & AlphaLLM:** The application of MCTS to latent states and language models.
 *   **Polyak Averaging:** The mathematical basis for the stable "soft update" injection.
 
-## 6. Current Constraints & Challenges
+## 7. Current Constraints & Challenges
 While the architecture functions, several practical bottlenecks remain:
 
 1.  **Global Interpreter Lock (GIL):** The implementation uses Python's `asyncio`, which is not truly parallel due to the GIL. This causes minor stuttering in generation when the planner is under heavy load. A robust implementation would require the planner to be implemented in C++ or Rust.
 2.  **Memory Overhead:** Storing the MCTS tree states requires significant VRAM. This has been optimized by re-computing states on the fly (trading compute for memory), but it limits the search depth on consumer hardware.
 3.  **The "Bootstrapping" Problem:** The planner relies on a trained Value Head to identify "good" states. However, the Value Head requires data from the planner to learn. This circular dependency makes the initial training phase slow and unstable.
 
-## 6. Conclusion
+## 8. Conclusion
 CRSM remains an experimental prototype. It has successfully demonstrated that **state injection in SSMs is mathematically viable** and that **asynchronous planning is architecturally possible**. The next phase of research focuses on scaling the training pipeline to produce a planner capable of genuine strategic insight.
