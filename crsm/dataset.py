@@ -3,12 +3,12 @@ Fixed dataset module with proper tokenizer handling and optimized streaming.
 """
 import gc
 from collections import deque
-from typing import Iterator, Optional
+from typing import Iterator, Optional, List, Tuple, Iterable
 import torch
 from torch.utils.data import Dataset, IterableDataset
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple, Iterable
+import numpy as np
 
 from .tokenizer import Tokenizer
 
@@ -43,6 +43,132 @@ class Vocab:
 
     def encode(self, tokens: List[str]) -> List[int]:
         return [self.stoi.get(t, self.stoi['<unk>']) for t in tokens]
+
+
+class PretokenizedDataset(IterableDataset):
+    """
+    Dataset that streams tokens from pre-tokenized binary files.
+    """
+    def __init__(self, data_dir: str, seq_len: int = 1024, split: str = "train", 
+                 vocab_size: int = 50257):
+        self.data_dir = Path(data_dir)
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        
+        # Check vocab size safety
+        if self.vocab_size > 65535:
+            raise ValueError(f"Vocab size {self.vocab_size} too large for uint16 storage used by PretokenizedDataset")
+        
+        # Find all bin files matching the split
+        self.files = sorted(list(self.data_dir.glob(f"*{split}*.bin")))
+        if not self.files:
+             raise FileNotFoundError(f"No bin files found in {data_dir} for split '{split}'. Did you run prepare_dataset.py?")
+            
+        print(f"Found {len(self.files)} bin files in {data_dir} for split {split}")
+        
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info:
+            # Shard files across workers
+            # Simple interleaving
+            files = self.files[worker_info.id::worker_info.num_workers]
+        else:
+            files = self.files
+            
+        # Buffer to hold tokens from multiple files to ensure continuity
+        buffer = np.array([], dtype=np.uint16)
+        chunk_len = self.seq_len + 1
+        
+        for path in files:
+            # Read file as numpy array
+            try:
+                # Use memmap for efficiency
+                new_data = np.memmap(path, dtype=np.uint16, mode='r')
+                
+                # Append to buffer (we have to copy here, but buffer is small)
+                # Actually, appending memmap to numpy array forces a read. 
+                # To be efficient, we should process the buffer as much as possible first.
+                
+                # However, for continuity, we need to stitch the end of the previous file 
+                # with the start of the new file.
+                
+                # Since we are iterating, we can yield chunks from `new_data` 
+                # but we need to handle the "leftover" from previous file.
+                
+                # If buffer is not empty (from previous iteration), prepend it
+                if len(buffer) > 0:
+                     # This forces a read of the whole file if we use np.concatenate
+                     # Ideally we only read the beginning.
+                     
+                     # Optimization: Only concat the leftovers with the start of new file?
+                     # No, memmap is array-like.
+                     
+                     # Let's just process the memmap directly and keep the tail in buffer.
+                     pass
+                
+                # We can't easily concatenate memmap without reading it. 
+                # Strategy: 
+                # 1. Take leftovers from buffer.
+                # 2. Iterate through memmap. 
+                # 3. If we have enough for a chunk using leftovers + start of memmap, yield it.
+                # 4. Then yield chunks from memmap.
+                # 5. Save tail of memmap to buffer.
+                
+                current_idx = 0
+                total_len = len(new_data)
+                
+                # Handle leftovers
+                if len(buffer) > 0:
+                    needed = chunk_len - len(buffer)
+                    if total_len >= needed:
+                        # Take 'needed' from new_data
+                        part = new_data[:needed] # This reads from disk
+                        full_chunk = np.concatenate([buffer, part])
+                        
+                        x = torch.from_numpy(full_chunk[:-1].astype(np.int64))
+                        y = torch.from_numpy(full_chunk[1:].astype(np.int64))
+                        yield x, y
+                        
+                        current_idx = needed
+                        buffer = np.array([], dtype=np.uint16)
+                    else:
+                        # File is too small to complete the buffer
+                        # Append all of it to buffer and continue to next file
+                        part = new_data[:]
+                        buffer = np.concatenate([buffer, part])
+                        continue
+                        
+                # Process main body of file
+                # We can compute how many chunks fit
+                remaining = total_len - current_idx
+                num_chunks = remaining // chunk_len
+                
+                if num_chunks > 0:
+                    # Create a view or slice
+                    # Note: slicing memmap returns memmap, which is good.
+                    # We can iterate over the slices.
+                    
+                    # But constructing individual tensors from memmap slices is fine.
+                    for i in range(num_chunks):
+                        start = current_idx + i * chunk_len
+                        end = start + chunk_len
+                        chunk = new_data[start:end]
+                        
+                        # Copy to memory and convert
+                        chunk_arr = np.array(chunk, dtype=np.int64)
+                        x = torch.from_numpy(chunk_arr[:-1])
+                        y = torch.from_numpy(chunk_arr[1:])
+                        yield x, y
+                        
+                    current_idx += num_chunks * chunk_len
+                    
+                # Save leftovers
+                if current_idx < total_len:
+                    buffer = np.array(new_data[current_idx:], dtype=np.uint16)
+                    
+            except Exception as e:
+                print(f"Error reading {path}: {e}")
+                continue
 
 
 class RealTextDataset(Dataset):
