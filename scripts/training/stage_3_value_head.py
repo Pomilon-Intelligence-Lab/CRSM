@@ -123,9 +123,23 @@ async def main_async():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="configs/training_config.yaml", help="Path to YAML config file")
+    
+    # Overrides
+    parser.add_argument('--epochs', type=int, help="Override value training epochs")
+    parser.add_argument('--lr', type=float, help="Override value training LR")
+    parser.add_argument('--seed', type=int, help="Random seed")
+    parser.add_argument('--device', type=str, help="Device (cpu/cuda)")
+    
     args = parser.parse_args()
 
     config = load_config(args.config)
+    
+    # Apply Overrides
+    if args.epochs: config['training']['value_training']['epochs'] = args.epochs
+    if args.lr: config['training']['value_training']['lr'] = args.lr
+    if args.seed: config['system']['seed'] = args.seed
+    if args.device: config['system']['device'] = args.device
+
     device = config['system']['device'] if torch.cuda.is_available() else 'cpu'
     set_seed(config['system']['seed'])
 

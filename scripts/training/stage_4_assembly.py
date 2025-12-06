@@ -31,9 +31,19 @@ def load_config(config_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="configs/training_config.yaml", help="Path to YAML config file")
+    
+    # Overrides
+    parser.add_argument('--seed', type=int, help="Random seed")
+    parser.add_argument('--device', type=str, help="Device (cpu/cuda)")
+    
     args = parser.parse_args()
 
     config_dict = load_config(args.config)
+    
+    # Apply Overrides
+    if args.seed: config_dict['system']['seed'] = args.seed
+    if args.device: config_dict['system']['device'] = args.device
+
     device = config_dict['system']['device'] if torch.cuda.is_available() else 'cpu'
     
     # Paths

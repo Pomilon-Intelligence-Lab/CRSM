@@ -24,6 +24,29 @@ def load_config(config_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="configs/training_config.yaml", help="Path to YAML config file")
+    
+    # Training Overrides
+    parser.add_argument('--epochs', type=int, help="Override number of epochs")
+    parser.add_argument('--batch-size', type=int, help="Override batch size")
+    parser.add_argument('--lr', type=float, help="Override learning rate")
+    parser.add_argument('--seq-len', type=int, help="Override sequence length")
+    parser.add_argument('--grad-accum', type=int, help="Override gradient accumulation steps")
+    
+    # System & Data
+    parser.add_argument('--seed', type=int, help="Random seed")
+    parser.add_argument('--data-dir', type=str, help="Path to data directory")
+    parser.add_argument('--tokenizer', type=str, help="Tokenizer name")
+    parser.add_argument('--num-workers', type=int, default=0, help="DataLoader workers")
+    parser.add_argument('--device', type=str, help="Device (cpu/cuda)")
+    
+    # Distributed / Resume
+    parser.add_argument('--distributed', action='store_true', help="Enable distributed training")
+    parser.add_argument('--resume', type=str, help="Path to checkpoint to resume from")
+    
+    # Logging
+    parser.add_argument('--no-wandb', action='store_true', help="Disable wandb")
+    parser.add_argument('--wandb-project', type=str, help="WandB project name")
+
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -37,33 +60,61 @@ def main():
     print("="*60)
     
     # Construct Command
+    # Start with config values, override if CLI arg is present
+    epochs = args.epochs if args.epochs is not None else config['training']['backbone_epochs']
+    batch_size = args.batch_size if args.batch_size is not None else config['training']['batch_size']
+    seq_len = args.seq_len if args.seq_len is not None else config['training']['seq_len']
+    lr = args.lr if args.lr is not None else config['training']['lr']
+    grad_accum = args.grad_accum if args.grad_accum is not None else config['training'].get('grad_accum', 1)
+    
     cmd = [
         sys.executable, '-m', 'crsm.cli', 'train',
-        '--epochs', str(config['training']['backbone_epochs']),
-        '--batch-size', str(config['training']['batch_size']),
+        '--epochs', str(epochs),
+        '--batch-size', str(batch_size),
         '--vocab-size', str(config['model']['vocab_size']),
-        '--seq-len', str(config['training']['seq_len']),
-        '--lr', str(config['training']['lr']),
+        '--seq-len', str(seq_len),
+        '--lr', str(lr),
         '--checkpoint-dir', str(output_dir),
         '--no-value-loss',
         '--d-model', str(config['model']['d_model']),
         '--d-state', str(config['model']['d_state']),
         '--d-ffn', str(config['model']['d_ffn']),
         '--num-layers', str(config['model']['num_layers']),
+        '--grad-accum', str(grad_accum),
+        '--num-workers', str(args.num_workers)
     ]
     
     # Optional Args
-    if 'data_dir' in config['data']:
-        cmd.extend(['--data-dir', config['data']['data_dir']])
+    data_dir = args.data_dir if args.data_dir else config['data'].get('data_dir')
+    if data_dir:
+        cmd.extend(['--data-dir', data_dir])
     
     if config['training'].get('use_amp', False):
         cmd.append('--amp')
         
-    if 'grad_accum' in config['training']:
-        cmd.extend(['--grad-accum', str(config['training']['grad_accum'])])
-        
-    if 'device' in config['system']:
+    if args.device:
+        cmd.extend(['--device', args.device])
+    elif 'device' in config['system']:
         cmd.extend(['--device', config['system']['device']])
+
+    if args.seed is not None:
+        cmd.extend(['--seed', str(args.seed)])
+    elif 'seed' in config['system']:
+        cmd.extend(['--seed', str(config['system']['seed'])])
+
+    if args.no_wandb:
+        cmd.append('--no-wandb')
+    elif args.wandb_project:
+        cmd.extend(['--wandb-project', args.wandb_project])
+    
+    if args.tokenizer:
+        cmd.extend(['--tokenizer', args.tokenizer])
+        
+    if args.resume:
+        cmd.extend(['--resume', args.resume])
+        
+    if args.distributed:
+        cmd.append('--distributed')
 
     print(f"Executing: {' '.join(cmd)}")
     

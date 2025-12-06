@@ -23,10 +23,27 @@ def load_config(config_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default="configs/training_config.yaml", help="Path to YAML config file")
+    
+    # Overrides
+    parser.add_argument('--epochs', type=int, help="Override dynamics epochs")
+    parser.add_argument('--batch-size', type=int, help="Override batch size")
+    parser.add_argument('--lr', type=float, help="Override dynamics LR")
+    parser.add_argument('--samples', type=int, help="Override number of transition samples")
+    parser.add_argument('--seed', type=int, help="Random seed")
+    parser.add_argument('--device', type=str, help="Device (cpu/cuda)")
+
     args = parser.parse_args()
 
     config = load_config(args.config)
     
+    # Apply Overrides
+    if args.epochs: config['dynamics']['dynamics_epochs'] = args.epochs
+    if args.batch_size: config['training']['batch_size'] = args.batch_size
+    if args.lr: config['dynamics']['dynamics_lr'] = args.lr
+    if args.samples: config['dynamics']['dynamics_samples'] = args.samples
+    if args.seed: config['system']['seed'] = args.seed
+    if args.device: config['system']['device'] = args.device
+
     backbone_path = Path("experiments/stage_1/backbone_final.pt")
     if not backbone_path.exists():
         print(f"✗ Backbone not found at {backbone_path}. Run Stage 1 first.")
