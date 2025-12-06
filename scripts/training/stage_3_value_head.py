@@ -229,14 +229,14 @@ async def main_async():
         loss = trainer.train_step(dataset)
         print(f"  Value Loss: {loss:.6f}")
         
-    # Save Final Model
-    final_path = output_dir / 'crsm_v1_complete.pt'
+    # Save Stage Artifact (Backbone with trained Value Head)
+    final_path = output_dir / 'backbone_with_value.pt'
     torch.save({
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model.backbone.state_dict(),
         'config': config
     }, final_path)
     
-    print(f"\n✓ Stage 3 Complete. Full CRSM saved to {final_path}")
+    print(f"\n✓ Stage 3 Complete. Backbone with Value Head saved to {final_path}")
 
 def main():
     asyncio.run(main_async())

@@ -35,25 +35,43 @@ print(output)
 
 ### 1. Prepare Data
 
-Before training, you need a text corpus. We provide a script to download and preprocess the WikiText-103 dataset:
+Before training, you need a text corpus. We provide a script to download and preprocess datasets (FineWeb-Edu, GSM8K) into efficient binary format.
 
 ```bash
-# Install the datasets library if you haven't
-pip install datasets
+# Install dependencies
+pip install datasets transformers
 
-# Download and prepare the data
-python scripts/setup/download_data.py --output_dir data/text_corpus
+# Download and prepare FineWeb-Edu (Sample)
+python scripts/data/prepare_dataset.py --dataset fineweb --output-dir data/fineweb --shard-size 10000000
+
+# Download and prepare GSM8K
+python scripts/data/prepare_dataset.py --dataset gsm8k --output-dir data/gsm8k
 ```
 
-This will create a `data/text_corpus/wikitext_train.txt` file ready for training.
+This will create `*.bin` files in the specified directories.
 
-### 2. Train Backbone
+### 2. Train Backbone (Stage 1)
 ```bash
-python scripts/training/train_full_crsm.py --config configs/baseline_27m.json
+python scripts/training/stage_1_backbone.py --config configs/baseline_27m.yaml
 ```
 
-### 3. Configuration
-Edit `configs/baseline_27m.json` to tune hyperparameters.
+### 3. Dynamics Distillation (Stage 2)
+```bash
+python scripts/training/stage_2_dynamics.py --config configs/baseline_27m.yaml
+```
+
+### 4. Value Head Training (Stage 3)
+```bash
+python scripts/training/stage_3_value_head.py --config configs/baseline_27m.yaml
+```
+
+### 5. Assembly (Stage 4)
+```bash
+python scripts/training/stage_4_assembly.py --config configs/baseline_27m.yaml
+```
+
+### 6. Configuration
+Edit `configs/baseline_27m.yaml` to tune hyperparameters.
 
 **Key Parameters:**
 *   `injection_rate`: (Float, 0.0-1.0) How strongly MCTS affects the state. Default `0.05`.

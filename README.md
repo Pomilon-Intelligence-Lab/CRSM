@@ -83,16 +83,26 @@ if __name__ == "__main__":
 
 ## 🛠️ Training Pipeline
 
-The architecture requires a 4-stage training pipeline to function correctly (orchestrated by `scripts/training/train_full_crsm.py`):
+The architecture requires a 4-stage training pipeline to function correctly (orchestrated by scripts in `scripts/training/`):
 
-1.  **Backbone Pre-training**: Standard CLM training for the Mamba model.
-2.  **Dynamics Distillation**: Training a small MLP to predict state transitions ($h_t \to h_{t+1}$) from the frozen backbone.
-3.  **Assembly**: Integrating the backbone and dynamics model.
-4.  **Value Head Fine-tuning**: Training the planner's value estimator to recognize high-quality states.
+1.  **Backbone Pre-training**: Standard CLM training for the Mamba model (`scripts/training/stage_1_backbone.py`).
+2.  **Dynamics Distillation**: Training a small MLP to predict state transitions ($h_t \to h_{t+1}$) from the frozen backbone (`scripts/training/stage_2_dynamics.py`).
+3.  **Value Head Fine-tuning**: Training the planner's value estimator to recognize high-quality states (`scripts/training/stage_3_value_head.py`).
+4.  **Assembly**: Integrating the trained components (Backbone + Dynamics) into a unified artifact (`scripts/training/stage_4_assembly.py`).
 
 To run the full pipeline on a small baseline:
 ```bash
-python scripts/training/train_full_crsm.py --config configs/baseline_27m.json
+# Stage 1: Train Backbone
+python scripts/training/stage_1_backbone.py --config configs/baseline_27m.yaml
+
+# Stage 2: Distill Dynamics
+python scripts/training/stage_2_dynamics.py --config configs/baseline_27m.yaml
+
+# Stage 3: Train Value Head
+python scripts/training/stage_3_value_head.py --config configs/baseline_27m.yaml
+
+# Stage 4: Assembly
+python scripts/training/stage_4_assembly.py --config configs/baseline_27m.yaml
 ```
 
 ---

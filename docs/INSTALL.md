@@ -264,7 +264,7 @@ pytest tests/ -v --tb=short
 
 ### 4. Try Colab Training
 
-Open `notebooks/colab_train_crsm_2b.ipynb` in Google Colab and run the cells.
+Open `notebooks/cloud_training/1_train_backbone.ipynb` in Google Colab and run the cells.
 
 ## Environment Variables
 

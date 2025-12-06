@@ -21,7 +21,7 @@ This phase involved the initial design, implementation, and debugging of the cor
 
 ## Phase 3: The "Centaur" Pipeline Implementation (✅ COMPLETE)
 
-We have successfully refactored the codebase into a modular 3-stage training pipeline (Backbone → Dynamics → Offline Value Training) and modernized the configuration system.
+We have successfully refactored the codebase into a modular 4-stage training pipeline (Backbone → Dynamics → Offline Value Training → Assembly) and modernized the configuration system.
 
 *   **[DONE]** **Refactoring & Archival:**
     *   Archived v0 prototype scripts to `scripts/archive/v0_prototype/`.
@@ -30,6 +30,7 @@ We have successfully refactored the codebase into a modular 3-stage training pip
     *   **Stage 1 (System 1):** Implemented `scripts/training/stage_1_backbone.py` for Mamba backbone training.
     *   **Stage 2 (Subconscious):** Implemented `scripts/training/stage_2_dynamics.py` for dynamics distillation.
     *   **Stage 3 (Judgment):** Implemented `scripts/training/stage_3_value_head.py` for offline Expert Iteration and value head training.
+    *   **Stage 4 (Assembly):** Implemented `scripts/training/stage_4_assembly.py` for final model integration.
 *   **[DONE]** **Evaluation & Verification:**
     *   Implemented `benchmark_reasoning.py` to compare System 1 vs. System 2 performance.
     *   Implemented `verify_steering.py` to validate state injection.
@@ -43,8 +44,8 @@ With the certified pipeline in place, we are ready to train on real data and mea
 
 *   **Tasks:**
     *   **1. Data Curation:**
-        *   **[TODO]** Prepare a high-quality reasoning dataset (e.g., OpenWebText, synthetic reasoning traces).
-        *   **[TODO]** Tokenize and shard data for efficient training.
+        *   **[DONE]** Prepare a high-quality reasoning dataset (e.g., OpenWebText, synthetic reasoning traces).
+        *   **[DONE]** Tokenize and shard data for efficient training.
     *   **2. Baseline Training (170M - 350M):**
         *   **[TODO]** Train the 170M parameter baseline using `configs/baseline_170m.yaml`.
         *   **[TODO]** Train the 350M parameter baseline using `configs/baseline_350m.yaml`.
