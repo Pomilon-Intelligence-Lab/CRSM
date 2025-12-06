@@ -32,4 +32,7 @@ data:
   traces_path: "data/train_traces.jsonl"
 
 tokenizer: null
-seed: 42
+
+system:
+  seed: 42
+  device: "cuda"

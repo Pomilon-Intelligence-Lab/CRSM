@@ -36,6 +36,10 @@ def main():
 
     config = load_config(args.config)
     
+    # Ensure system config exists
+    if 'system' not in config:
+        config['system'] = {'seed': 42, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+    
     # Apply Overrides
     if args.epochs: config['dynamics']['dynamics_epochs'] = args.epochs
     if args.batch_size: config['training']['batch_size'] = args.batch_size

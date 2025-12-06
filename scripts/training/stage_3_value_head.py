@@ -134,6 +134,10 @@ async def main_async():
 
     config = load_config(args.config)
     
+    # Ensure system config exists
+    if 'system' not in config:
+        config['system'] = {'seed': 42, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+    
     # Apply Overrides
     if args.epochs: config['training']['value_training']['epochs'] = args.epochs
     if args.lr: config['training']['value_training']['lr'] = args.lr

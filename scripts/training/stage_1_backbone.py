@@ -92,15 +92,17 @@ def main():
     if config['training'].get('use_amp', False):
         cmd.append('--amp')
         
+    system_config = config.get('system', {})
+    
     if args.device:
         cmd.extend(['--device', args.device])
-    elif 'device' in config['system']:
-        cmd.extend(['--device', config['system']['device']])
+    elif system_config.get('device'):
+        cmd.extend(['--device', system_config['device']])
 
     if args.seed is not None:
         cmd.extend(['--seed', str(args.seed)])
-    elif 'seed' in config['system']:
-        cmd.extend(['--seed', str(config['system']['seed'])])
+    elif system_config.get('seed'):
+        cmd.extend(['--seed', str(system_config['seed'])])
 
     if args.no_wandb:
         cmd.append('--no-wandb')
@@ -109,6 +111,8 @@ def main():
     
     if args.tokenizer:
         cmd.extend(['--tokenizer', args.tokenizer])
+    elif config.get('tokenizer'):
+        cmd.extend(['--tokenizer', config['tokenizer']])
         
     if args.resume:
         cmd.extend(['--resume', args.resume])

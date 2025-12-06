@@ -40,6 +40,10 @@ def main():
 
     config_dict = load_config(args.config)
     
+    # Ensure system config exists
+    if 'system' not in config_dict:
+        config_dict['system'] = {'seed': 42, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+    
     # Apply Overrides
     if args.seed: config_dict['system']['seed'] = args.seed
     if args.device: config_dict['system']['device'] = args.device
