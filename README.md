@@ -24,17 +24,16 @@ Standard Transformers typically face a latency trade-off: to perform "System 2" 
 
 ## 💡 Key Architectural Experiments
 
-### 1. Gated State Injection (Stability Control)
-Directly modifying a model's high-dimensional latent state often leads to "state explosion."
-The proposed mechanism is **Gated Injection**:
-$$h_{t} \leftarrow (1 - \alpha_{eff}) \cdot h_{t} + \alpha_{eff} \cdot h_{target}$$
-This acts as a "low-pass filter" for thoughts. It allows the planner to gently nudge the model's intuition towards a better trajectory without disrupting the stability of the underlying state manifold.
+### 1. Sparse-Gated Hierarchical Injection
+To maintain stability while allowing deep planning, CRSM uses **Sparse-Gated Injection**. Each layer in the Mamba hierarchy is treated as a sovereign entity with its own "gate." The planner injects state updates independently into each layer based on its specific confidence.
+$$h_{i,t} \leftarrow (1 - \alpha_{i}) \cdot h_{i,t} + \alpha_{i} \cdot h_{i,target}$$
+This allows the planner to aggressively update high-level strategy layers (Layer 24) while leaving low-level sensory features (Layer 1) untouched.
 
-### 2. Asynchronous Deliberation Loop
-The planner executes in a background thread (`asyncio`) using a distilled **Latent Dynamics Model**. This lightweight neural network predicts state transitions, allowing the planner to simulate thousands of future steps quickly. This design intends to allow the main model to maintain fluent generation while "thinking" occurs in parallel.
+### 2. Forward-Projected Planning (Alignment)
+Planning takes time. In an asynchronous system, by the time MCTS finds a better state $S_t$, the generator has already moved to $S_{t+3}$. CRSM solves this via **Forward Projection**: the planner uses its internal dynamics model to "fast-forward" the current state to the target position before starting the search. Updates are then held in a **Targeted Delta Buffer** and applied at the exact micro-second they align with the generation loop.
 
-### 3. Dynamic Confidence Scaling
-To prevent an uncertain planner from degrading the model's output, the injection rate ($\alpha$) is scaled by the planner's confidence. If the MCTS Value Head is unsure, the system defaults back to the pure, stable Mamba backbone.
+### 3. Multi-Headed Consensus & Uncertainty
+Instead of a single "Value Head," CRSM employs a **Multi-Headed Value Critic (MV-Critic)**, one for every layer. The planner's utility score is a weighted consensus of these heads. If the layers disagree (high variance in values), the system applies an **Uncertainty Penalty**, favoring reasoning paths that are stable across all levels of abstraction.
 
 ---
 

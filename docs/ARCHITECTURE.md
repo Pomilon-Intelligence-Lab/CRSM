@@ -19,7 +19,7 @@ Efficient sequence modeling layers that operate in linear time:
 - **State Space Model (S4)**: Compresses history into a state vector
 - **Mamba**: Recent efficient SSM variant with selective state updates
 - Typically stacked in `num_hidden_layers` blocks
-- Each layer maintains hidden state of dimension `hidden_size`
+- **Hierarchical Policy Fusion**: Instead of using only the final layer for the output policy, CRSM uses a **Learned Weighted Sum** of all layer states. This ensures the model integrates both high-level semantic rules and raw spatial/syntactic context.
 
 ### 3. Continuous Reasoning State
 
@@ -35,6 +35,7 @@ The state matrix $\bar{A}$ is selected dynamically based on planning signals fro
 
 Asynchronous MCTS/Tree-of-Thoughts module that:
 - Runs parallel to token generation without blocking latency
+- **Forward-Projected Planning**: Uses the dynamics model to "fast-forward" the latent state to the target position ($S_t \to S_{t+lag}$) before search begins.
 - Explores multiple reasoning paths and future states
 - Performs introspective node expansion for self-correction
 - Generates planning signals that modulate the continuous state
@@ -47,23 +48,31 @@ Linear layer projecting from hidden dimension to vocabulary:
 - Output: `[batch, seq_len, vocab_size]`
 - Logits are then passed to softmax for next-token prediction
 
-### 6. Gated State Injection (Stability Mechanism)
+### 6. Sparse-Gated Hierarchical Injection (Stability Mechanism)
 
 **Note:** The primary innovation of CRSM is the **asynchronous interaction loop** between the System 1 backbone and the System 2 planner. The Gated Injection formula below is simply the stabilizing mechanism that makes this loop mathematically viable on a continuous manifold.
 
-To safely integrate the asynchronous thought vectors into the sensitive Mamba manifold, CRSM employs a **Gated Injection** mechanism rather than simple additive perturbation.
+To safely integrate the asynchronous thought vectors into the sensitive Mamba manifold, CRSM employs **Sparse-Gated Hierarchical Injection**. Each layer is treated as a sovereign entity with its own independent gate.
 
-The update rule is:
-$h_{new} = (1 - \alpha_{eff}) \cdot h_{old} + \alpha_{eff} \cdot h_{target}$
+The update rule for each layer $i$ is:
+$h_{i,new} = (1 - \alpha_{i}) \cdot h_{i,old} + \alpha_{i} \cdot h_{i,target}$
 
 Where:
-- $h_{target}$ is the state proposed by the MCTS planner.
-- $\alpha_{eff}$ is the effective injection rate, calculated as: `injection_rate * confidence`.
-- `confidence` is the value estimate from the MCTS root node.
+- $h_{i,target}$ is the layer-specific state proposed by the **Multi-Layer Delta Broadcaster**.
+- $\alpha_{i}$ is the effective injection rate for layer $i$, calculated using a Sigmoid gate over the **Multi-Headed Value Critic** output.
+- Confidence is no longer a scalar; it is a vector representing how sure each level of abstraction is about the proposed plan.
 
 This ensures that:
-1.  **Stability:** The state norm remains bounded (interpolation vs addition).
-2.  **Safety:** If the planner is unsure (low confidence), the state is barely modified.
+1.  **Sovereignty:** The planner can refine high-level logic (Strategy) without corrupting low-level syntax (Pixels).
+2.  **Consensus:** The MCTS favors paths where all layers agree on the state's utility.
+
+### 7. Targeted Delta Alignment
+
+Planning occurs in parallel with generation. To ensure mathematical validity, a plan optimized for a future token position must be applied **exactly** at that position.
+
+1.  **Buffering**: Planning results are stored in a **Targeted Delta Buffer**, keyed by the target generation step.
+2.  **Application**: During the generation loop, the model checks the buffer. If a delta exists for the current step, it is injected immediately before the next token prediction.
+3.  **Lag Correction**: If a plan arrives too late (generation has already passed the target step), it is decayed exponentially or pruned to prevent "Stale Thought" corruption.
 
 ## Configuration
 

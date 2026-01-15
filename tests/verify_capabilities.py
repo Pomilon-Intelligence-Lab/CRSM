@@ -64,7 +64,7 @@ class LogicTrainer:
             
         return data
 
-    def train(self, data, epochs=200):
+    def train(self, data, epochs=50):
         print(f"Starting training on {len(data)} samples...")
         self.model.train()
         
@@ -145,19 +145,24 @@ class LogicTrainer:
                 # A. Positive Sample (Correct Path)
                 log_probs = F.log_softmax(shift_logits, dim=-1)
                 token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
-                value_target_pos = torch.exp(token_log_probs).detach() 
+                value_target_pos = torch.exp(token_log_probs).detach().view(-1) 
                 
-                value_pred_pos = self.model.crsm.backbone.value_head(states_t_flat).squeeze(-1)
-                loss_value_pos = self.loss_fn_mse(value_pred_pos, value_target_pos.view(-1))
+                # Multi-Headed Value Critic
+                # We use states_t (h[:, :-1, :]) flattened
+                st_flat = states_t.reshape(-1, states_t.size(-1))
+                layer_states_pos = [st_flat] * self.model.config.num_hidden_layers
+                value_preds_pos = self.model.crsm.backbone._compute_layer_values(layer_states_pos)
+                loss_value_pos = sum(self.loss_fn_mse(v, value_target_pos) for v in value_preds_pos)
                 
                 # B. Negative Sample (Wrong/Noisy Path)
                 # We perturb the states to simulate a "Bad Thought" and teach it value is 0.0
-                noise = torch.randn_like(states_t_flat) * 1.0 # Significant noise
-                states_bad_flat = states_t_flat + noise
-                value_pred_neg = self.model.crsm.backbone.value_head(states_bad_flat).squeeze(-1)
+                noise = torch.randn_like(st_flat) * 1.0 
+                st_bad = st_flat + noise
+                layer_states_neg = [st_bad] * self.model.config.num_hidden_layers
+                value_preds_neg = self.model.crsm.backbone._compute_layer_values(layer_states_neg)
                 
-                value_target_neg = torch.zeros_like(value_pred_neg)
-                loss_value_neg = self.loss_fn_mse(value_pred_neg, value_target_neg)
+                value_target_neg = torch.zeros_like(value_target_pos)
+                loss_value_neg = sum(self.loss_fn_mse(v, value_target_neg) for v in value_preds_neg)
                 
                 loss_value = loss_value_pos + loss_value_neg
                 
@@ -285,7 +290,10 @@ async def run_experiments(model: CRSMModel, trainer: LogicTrainer):
     # 2. Autonomous Loop (Single Step)
     state_copy = [s.clone() if s is not None else None for s in model.crsm.latent_state]
     suggestion, delta, confidence = await model.crsm.reasoning.deliberate(None, state_copy)
-    print(f"  [Debug] Planner Confidence: {confidence:.4f}")
+    
+    # confidence is now a list
+    avg_conf = sum(confidence) / len(confidence) if isinstance(confidence, list) else confidence
+    print(f"  [Debug] Planner Confidence: {avg_conf:.4f}")
     
     # 3. Apply Delta
     if delta is not None:
@@ -444,7 +452,7 @@ if __name__ == "__main__":
     model = CRSMModel(config)
     trainer = LogicTrainer(model)
     
-    data = trainer.generate_data()
+    data = trainer.generate_data(num_samples=100)
     trainer.train(data)
     
     asyncio.run(run_experiments(model, trainer))

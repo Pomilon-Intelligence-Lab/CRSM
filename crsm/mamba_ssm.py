@@ -59,8 +59,15 @@ class MambaModel(nn.Module):
         ])
         self.norm = nn.LayerNorm(d_model)
         self.output = nn.Linear(d_model, vocab_size)
-        # Small value head for MCTS evaluations
-        self.value_head = nn.Linear(d_model, 1)
+        
+        # Multi-Headed Value Critic (one per layer)
+        self.value_heads = nn.ModuleList([
+            nn.Linear(d_model, 1) for _ in range(num_layers)
+        ])
+        
+        # Hierarchical Policy Fusion Weights
+        # Allows the model to learn which layers contribute most to the final policy.
+        self.layer_fusion_weights = nn.Parameter(torch.ones(num_layers))
         
     def forward(self, x, states=None):
         x = self.embedding(x)
@@ -133,15 +140,49 @@ class MambaModel(nn.Module):
         return logits, new_states
 
 
+    def _compute_layer_values(self, states):
+        """Helper to compute per-layer value estimates."""
+        device = next(self.parameters()).device
+        d_model = self.output.in_features
+        values = []
+        
+        if not isinstance(states, list):
+            # Fallback if states is not a list (unlikely in normal op)
+            return [torch.tensor([0.0], device=device) for _ in self.layers]
+
+        for i, (state, v_head) in enumerate(zip(states, self.value_heads)):
+            if state is None:
+                values.append(torch.tensor([0.0], device=device))
+                continue
+                
+            s = state
+            # ensure batch dim
+            if s.dim() == 1:
+                s = s.unsqueeze(0)
+            
+            # Align dimensions to d_model
+            if s.shape[1] != d_model:
+                if s.shape[1] > d_model:
+                    s = s[:, :d_model]
+                else:
+                    pad = torch.zeros((s.shape[0], d_model - s.shape[1]), device=device)
+                    s = torch.cat([s, pad], dim=1)
+            
+            # Compute value
+            v = v_head(s).squeeze(-1) # (batch,)
+            values.append(v)
+            
+        return values
+
     def predict_policy_value(self, x, states=None):
-        """Return policy logits and a scalar value estimate for the input sequence.
+        """Return policy logits and vector of value estimates for the input sequence.
 
         Args:
             x: token ids tensor (batch, seq_len)
             states: optional list of previous states
         Returns:
             logits: (batch, seq_len, vocab)
-            value: (batch,) scalar value estimates (from last token)
+            values: List[torch.Tensor] (batch,) scalar value estimates per layer
             new_states: list of states per layer
         """
         h = self.embedding(x)
@@ -154,10 +195,11 @@ class MambaModel(nn.Module):
 
         h = self.norm(h)
         logits = self.output(h)
-        # value from last token
-        last_hidden = h[:, -1, :]
-        value = self.value_head(last_hidden).squeeze(-1)
-        return logits, value, new_states
+        
+        # value from new_states
+        values = self._compute_layer_values(new_states)
+        
+        return logits, values, new_states
 
 
     def predict_from_states(self, states):
@@ -167,7 +209,7 @@ class MambaModel(nn.Module):
             states: list of per-layer state tensors or a single tensor.
         Returns:
             logits: (batch, 1, vocab)
-            value: (batch,) scalar estimates
+            values: List[torch.Tensor] (batch,) scalar estimates per layer
             new_states: None (not applicable)
         """
         device = next(self.parameters()).device
@@ -204,7 +246,10 @@ class MambaModel(nn.Module):
                             pad = torch.zeros((batch, d_model - s.shape[1]), device=device)
                             s = torch.cat([s, pad], dim=1)
                     aligned.append(s)
-                h = sum(aligned) / len(aligned)
+                
+                # Hierarchical Policy Fusion: Learned Weighted Sum
+                weights = torch.softmax(self.layer_fusion_weights, dim=0)
+                h = sum(w * s for w, s in zip(weights, aligned))
         elif isinstance(states, torch.Tensor):
             s = states
             if s.dim() == 1:
@@ -224,6 +269,8 @@ class MambaModel(nn.Module):
         h_seq = h.unsqueeze(1)
         h_seq = self.norm(h_seq)
         logits = self.output(h_seq)
-        last_hidden = h_seq[:, -1, :]
-        value = self.value_head(last_hidden).squeeze(-1)
-        return logits, value, None
+        
+        # Values from input states
+        values = self._compute_layer_values(states)
+        
+        return logits, values, None

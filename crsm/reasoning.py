@@ -21,11 +21,28 @@ class MCTSNode:
     state_cache: Optional[List[torch.Tensor]] = None # Cached state (list of tensors)
     visit_count: int = 0
     value_sum: float = 0.0
+    layer_value_sums: Optional[List[float]] = None # Sum of values per layer
     
     @property
     def value(self) -> float:
         if self.visit_count == 0:
             return 0.0
+        
+        # If we have layer values, implement Weighted Consensus with Uncertainty Penalty
+        if self.layer_value_sums:
+            layer_means = [s / self.visit_count for s in self.layer_value_sums]
+            
+            # Compute mean and standard deviation across layers
+            # High variance across layers indicates the model's abstraction levels disagree
+            # which we treat as "unstable" or "uncertain".
+            v_tensor = torch.tensor(layer_means)
+            mean_v = v_tensor.mean().item()
+            # If only one layer, std is 0
+            std_v = v_tensor.std().item() if v_tensor.numel() > 1 else 0.0
+            
+            # Consensus = Mean Value - Lambda * Uncertainty
+            return mean_v - 0.1 * std_v
+            
         return self.value_sum / self.visit_count
     
     def expanded(self) -> bool:
@@ -104,6 +121,26 @@ class AsyncDeliberationLoop:
             node = best_child
             
         return node, path
+
+    def project_future_state(self, state: List[torch.Tensor], k_steps: int) -> List[torch.Tensor]:
+        """
+        Fast-forward a state by k steps using the dynamics model.
+        Used to align the planner with a future generation position.
+        """
+        if k_steps <= 0:
+            return state
+            
+        curr_state = state
+        with torch.no_grad():
+            for _ in range(k_steps):
+                # 1. Predict next token (greedy)
+                logits, _, _ = self.model.predict_from_states(curr_state)
+                action = torch.argmax(logits[0, -1]).item()
+                
+                # 2. Advance state
+                curr_state = self._get_next_state(curr_state, action)
+                
+        return curr_state
     
     def expand_node(self, node: MCTSNode, logits: torch.Tensor, value: float):
         """Expand a leaf node using model predictions"""
@@ -128,7 +165,7 @@ class AsyncDeliberationLoop:
         """Simulate next state - uses fast dynamics if available."""
         device = next(self.model.parameters()).device
 
-        # Fast dynamics path
+        # Fast dynamics path: MULTI-LAYER BROADCASTER
         if isinstance(state, list) and self.dynamics_model is not None:
             try:
                 token = torch.tensor([[action]], dtype=torch.long, device=device)
@@ -138,19 +175,20 @@ class AsyncDeliberationLoop:
                 else:
                     action_emb = self.model.embedding(token).squeeze(0).squeeze(0)
                 
+                # Broadcaster call: Call once for all layers
+                layer_deltas = self.dynamics_model(state, action_emb)
+                
                 next_states = []
-                for layer_state in state:
+                for i, layer_state in enumerate(state):
                     if layer_state is None:
                         next_states.append(None)
                         continue
                     
-                    s_input = layer_state.squeeze(0) if layer_state.dim() > 1 else layer_state
-                    delta = self.dynamics_model(s_input, action_emb)
-                    
+                    delta = layer_deltas[i]
                     if layer_state.dim() > 1:
-                        next_layer_state = layer_state + delta.unsqueeze(0)
+                        next_layer_state = layer_state + (delta.unsqueeze(0) if delta.dim() == 1 else delta)
                     else:
-                        next_layer_state = layer_state + delta
+                        next_layer_state = layer_state + delta.squeeze(0)
                     next_states.append(next_layer_state)
                 
                 return next_states
@@ -177,7 +215,14 @@ class AsyncDeliberationLoop:
         cur = node
         while cur is not None:
             cur.visit_count += 1
-            cur.value_sum += float(value)
+            if isinstance(value, list):
+                if cur.layer_value_sums is None:
+                    # Initialize with zeros for each layer
+                    cur.layer_value_sums = [0.0] * len(value)
+                for i, v in enumerate(value):
+                    cur.layer_value_sums[i] += v
+            else:
+                cur.value_sum += float(value)
             cur = cur.parent
             
     def deliberate_sync(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor], float]:
@@ -215,11 +260,15 @@ class AsyncDeliberationLoop:
         device = next(self.model.parameters()).device
         with torch.no_grad():
             if use_latent:
-                logits, value, _ = self.model.predict_from_states(root_state)
+                logits, values, _ = self.model.predict_from_states(root_state)
             else:
-                logits, value, _ = self.model.predict_policy_value(root_state.unsqueeze(0))
+                logits, values, _ = self.model.predict_policy_value(root_state.unsqueeze(0))
         last_logits = logits[0, -1]
-        self.expand_node(root, last_logits, float(value.item()) if hasattr(value, 'item') else float(value))
+        
+        # values is list of tensors, convert to list of floats
+        value_list = [v.item() for v in values]
+        
+        self.expand_node(root, last_logits, value_list)
 
         # Run simulations
         for _ in range(self.n_simulations):
@@ -231,12 +280,14 @@ class AsyncDeliberationLoop:
             if not leaf.expanded():
                 with torch.no_grad():
                     if use_latent:
-                        logits, value, _ = self.model.predict_from_states(leaf_state)
+                        logits, values, _ = self.model.predict_from_states(leaf_state)
                     else:
-                        logits, value, _ = self.model.predict_policy_value(leaf_state.unsqueeze(0))
+                        logits, values, _ = self.model.predict_policy_value(leaf_state.unsqueeze(0))
                 last_logits = logits[0, -1]
-                self.expand_node(leaf, last_logits, float(value.item()) if hasattr(value, 'item') else float(value))
-                rollout_value = float(value.item()) if hasattr(value, 'item') else float(value)
+                value_list = [v.item() for v in values]
+                
+                self.expand_node(leaf, last_logits, value_list)
+                rollout_value = value_list
             else:
                 rollout_value = self._rollout_value(leaf_state)
 
@@ -252,7 +303,11 @@ class AsyncDeliberationLoop:
         
         # Get confidence from the best child's value estimate
         best_child = root.children[best]
-        confidence = best_child.value
+        # Return list of confidences if available
+        if best_child.layer_value_sums:
+            confidence = [s / best_child.visit_count for s in best_child.layer_value_sums]
+        else:
+            confidence = best_child.value # Fallback scalar
 
         delta = self._compute_delta_from_mcts(root, best)
         return int(best), delta, confidence
@@ -299,7 +354,7 @@ class AsyncDeliberationLoop:
         """Async wrapper for deliberation."""
         return await asyncio.to_thread(self.deliberate_sync, seq, state)
 
-    def _rollout_value(self, state: List[torch.Tensor]) -> float:
+    def _rollout_value(self, state: List[torch.Tensor]) -> List[float]:
         """Improved rollout with optional sampling."""
         # state passed in is already reconstructed
         device = next(self.model.parameters()).device
@@ -313,7 +368,7 @@ class AsyncDeliberationLoop:
         if is_token_seq:
             for _ in range(self.rollout_depth):
                 with torch.no_grad():
-                    logits, value, _ = self.model.predict_policy_value(state.unsqueeze(0))
+                    logits, values, _ = self.model.predict_policy_value(state.unsqueeze(0))
                 last_logits = logits[0, -1]
                 
                 if self.use_sampling:
@@ -325,15 +380,15 @@ class AsyncDeliberationLoop:
                 state = self._get_next_state(state, action)
             
             with torch.no_grad():
-                _, value, _ = self.model.predict_policy_value(state.unsqueeze(0))
-            return float(value.item()) if hasattr(value, 'item') else float(value)
+                _, values, _ = self.model.predict_policy_value(state.unsqueeze(0))
+            return [v.item() for v in values]
         else:
             if isinstance(state, list):
                 with torch.no_grad():
-                    _, value, _ = self.model.predict_from_states(state)
-                return float(value.item()) if hasattr(value, 'item') else float(value)
+                    _, values, _ = self.model.predict_from_states(state)
+                return [v.item() for v in values]
             else:
                 dummy = torch.zeros((1, 1), dtype=torch.long, device=device)
                 with torch.no_grad():
-                    _, value, _ = self.model.predict_policy_value(dummy)
-                return float(value.item()) if hasattr(value, 'item') else float(value)
+                    _, values, _ = self.model.predict_policy_value(dummy)
+                return [v.item() for v in values]

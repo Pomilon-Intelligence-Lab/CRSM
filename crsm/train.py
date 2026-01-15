@@ -100,11 +100,22 @@ def compute_loss_with_value(model, x, y, criterion, use_value_loss=True):
             # Target value is the probability (0.0 to 1.0)
             target_value = torch.exp(token_log_probs)
 
-        # Value is (batch,) from last token
-        value_loss = F.mse_loss(value, target_value)
+        # Value is (batch,) from last token (or list of tensors)
+        if isinstance(value, list):
+            value_loss = sum(F.mse_loss(v, target_value) for v in value)
+        else:
+            value_loss = F.mse_loss(value, target_value)
         
         # Combined loss with value weight (increased from 0.1 to 1.0 to ensure signal)
         total_loss = lm_loss + 1.0 * value_loss
+        
+        # Hierarchical Weight Supervision: Entropy Loss
+        # Prevents early collapse into a single-layer policy.
+        if hasattr(model, 'layer_fusion_weights'):
+            weights = torch.softmax(model.layer_fusion_weights, dim=0)
+            entropy = -torch.sum(weights * torch.log(weights + 1e-8))
+            # Subtract entropy to maximize it (encourage uniform distribution/fusion)
+            total_loss = total_loss - 0.01 * entropy
     else:
         total_loss = lm_loss
     

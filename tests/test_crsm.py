@@ -53,7 +53,11 @@ def test_predict_policy_value():
     x = torch.randint(0, 500, (2, 8))
     logits, value, states = m.predict_policy_value(x)
     assert logits.shape == (2, 8, 500)
-    assert value.shape == (2,)
+    
+    # Expect list of values (one per layer)
+    assert isinstance(value, list)
+    assert len(value) == 2
+    assert value[0].shape == (2,)
 
 def test_trainer_smoke():
     # Run a tiny training epoch to ensure trainer runs

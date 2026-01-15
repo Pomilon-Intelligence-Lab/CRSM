@@ -38,9 +38,20 @@ We have successfully refactored the codebase into a modular 4-stage training pip
 *   **[DONE]** **Cloud Readiness:**
     *   Created Google Colab notebooks for all three training stages (`notebooks/cloud_training/`).
 
-## Phase 4: Large-Scale Training & Benchmarking (🚀 NEXT STEPS)
+## Phase 4: Hierarchical State Sovereignty & Aligned Planning (✅ COMPLETE)
 
-With the certified pipeline in place, we are ready to train on real data and measure capabilities.
+This phase addressed the "Policy Blurring" and "Async Drift" issues, moving the architecture from a monolithic state model to a hierarchical committee of sovereign layers.
+
+*   **[DONE]** **Multi-Headed Value Critic (MV-Critic):** Implemented independent value heads for every layer to enable granular confidence scoring.
+*   **[DONE]** **Sparse-Gated Hierarchical Injection:** Replaced global gating with per-layer sovereignty, allowing strategy layers to update while syntax layers remain stable.
+*   **[DONE]** **Hierarchical Policy Fusion:** Implemented a Learned Weighted Sum of all abstraction levels for the final output policy.
+*   **[DONE]** **Forward-Projected Planning:** Enabled the planner to fast-forward states using the dynamics model to align with future generation steps.
+*   **[DONE]** **Targeted Delta Buffer:** Implemented precise state-step alignment to ensure MCTS results are injected exactly at their intended positions.
+*   **[DONE]** **Upgraded Dynamics (Recurrent World Model):** Upgraded the MLP dynamics to a GRUCell for higher simulation fidelity.
+
+## Phase 5: Large-Scale Training & Benchmarking (🚀 NEXT STEPS)
+
+With the hierarchical architecture certified, we are ready to train on real data and measure capabilities.
 
 *   **Tasks:**
     *   **1. Data Curation:**
@@ -53,7 +64,7 @@ With the certified pipeline in place, we are ready to train on real data and mea
         *   **[TODO]** Evaluate on standard reasoning benchmarks (GSM8K, ARC).
         *   **[TODO]** Conduct ablation studies on "Injection Rate" and "Deliberation Lag".
 
-## Phase 5: Scaling and Optimization
+## Phase 6: Scaling and Optimization
 
 *   **Tasks:**
     *   **1. Scale to 1B+ Parameters:**
@@ -62,7 +73,7 @@ With the certified pipeline in place, we are ready to train on real data and mea
         *   **[TODO]** Port MCTS logic to Rust/C++ for lower latency.
         *   **[TODO]** Implement true parallel execution (System 2 not blocking System 1).
 
-## Phase 6: Publication and Release
+## Phase 7: Publication and Release
 
 *   **Tasks:**
     *   **[TODO]** Write and submit research paper.

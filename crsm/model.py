@@ -10,7 +10,8 @@ import asyncio
 import os
 import json
 import uuid
-from typing import Optional, Tuple, List, Dict
+import math
+from typing import Optional, Tuple, List, Dict, Union
 from dataclasses import dataclass
 from .logger import logger
 
@@ -166,7 +167,7 @@ class CRSM(nn.Module):
         )
         
         # Dynamics model
-        self.dynamics = LatentDynamics(d_model=d_model)
+        self.dynamics = LatentDynamics(d_model=d_model, num_layers=num_layers)
         
         # Reasoning module
         self.reasoning = AsyncDeliberationLoop(
@@ -207,6 +208,10 @@ class CRSM(nn.Module):
         self._stop_deliberation = False
         self.state_update_queue = asyncio.Queue()
         self.current_generation_id = None
+        self._current_step_index = 0  # Track step for lag calculation
+        
+        # Targeted Delta Buffer: Ensures deltas are applied at the exact step they were planned for.
+        self._targeted_deltas = {}
     
     def load_dynamics(self, dynamics_path: str):
         """Load trained dynamics model."""
@@ -248,7 +253,7 @@ class CRSM(nn.Module):
         self.latent_state = self.backbone.init_state(batch_size=batch_size, device=device)
         return self.latent_state
 
-    def apply_state_delta(self, delta, scale: Optional[float] = None):
+    def apply_state_delta(self, delta, scale: Optional[Union[float, List[float]]] = None):
         """
         Apply state update from deliberation.
         
@@ -260,20 +265,28 @@ class CRSM(nn.Module):
         if delta is None or self.latent_state is None:
             return
         
-        # Use configured injection rate
-        alpha = self.injection_rate
-        if scale is not None:
-            alpha = scale
-            
+        # Default alpha
+        base_alpha = self.injection_rate
+        
         try:
             if isinstance(self.latent_state, list) and isinstance(delta, list):
                 for i in range(min(len(self.latent_state), len(delta))):
                     if self.latent_state[i] is None or delta[i] is None:
                         continue
+                        
+                    # Determine alpha for this layer
+                    if isinstance(scale, list) and i < len(scale):
+                        alpha = scale[i]
+                    elif isinstance(scale, (float, int)):
+                        alpha = scale
+                    else:
+                        alpha = base_alpha
+                        
                     # Gated Injection: (1 - alpha) * state + alpha * target
                     self.latent_state[i] = (1 - alpha) * self.latent_state[i] + alpha * delta[i]
             else:
-                # Gated Injection
+                # Gated Injection for single tensor
+                alpha = scale if isinstance(scale, (float, int)) else base_alpha
                 self.latent_state = (1 - alpha) * self.latent_state + alpha * delta
         except Exception:
             return
@@ -364,7 +377,24 @@ class CRSM(nn.Module):
                 async with self._state_lock:
                     state_copy = [s.clone() if s is not None else None 
                                 for s in self.latent_state]
+                    captured_step = self._current_step_index
                 
+                # =========================================================
+                # FORWARD-PROJECTED PLANNING
+                # =========================================================
+                # If we are planning for a future position, we must project
+                # the current state forward to that position.
+                lag = position - captured_step
+                if lag > 0:
+                    # logger.debug(f"  [Deliberation] Projecting state forward {lag} steps...")
+                    state_to_plan = await asyncio.to_thread(
+                        self.reasoning.project_future_state,
+                        state_copy,
+                        lag
+                    )
+                else:
+                    state_to_plan = state_copy
+
                 # Run MCTS (this is the slow part, but it's in background)
                 logger.debug(f"  [Deliberation] Planning for position {position}...")
                 
@@ -372,15 +402,15 @@ class CRSM(nn.Module):
                 action, delta, confidence = await asyncio.to_thread(
                     self.reasoning.deliberate_sync,
                     sequence,
-                    state_copy
+                    state_to_plan
                 )
                 
                 # Store result
                 self._deliberation_results[position] = (action, confidence)
                 
-                # Queue state update (Now including confidence!)
+                # Queue state update (Now including confidence and captured_step)
                 if delta is not None:
-                    await self.state_update_queue.put((position, delta, gen_id, confidence))
+                    await self.state_update_queue.put((position, delta, gen_id, confidence, captured_step))
                 
                 # print(f"  [Deliberation] Completed for position {position}: token={action} (conf={confidence:.2f})")
                 
@@ -427,11 +457,15 @@ class CRSM(nn.Module):
                 # (pos, delta)
                 # (pos, delta, gen_id)
                 # (pos, delta, gen_id, confidence)
+                # (pos, delta, gen_id, confidence, captured_step)
                 
                 gen_id = None
                 confidence = 1.0 # Default confidence if not provided
+                captured_step = current_step # Default to 0 lag if unknown
                 
-                if len(item) == 4:
+                if len(item) == 5:
+                    position, delta, gen_id, confidence, captured_step = item
+                elif len(item) == 4:
                     position, delta, gen_id, confidence = item
                 elif len(item) == 3:
                     position, delta, gen_id = item
@@ -445,19 +479,49 @@ class CRSM(nn.Module):
                         continue
                 
                 # =========================================================
-                # GATED INJECTION UPDATE (CONFIDENCE SCALED)
+                # LAG-AWARE DECAY
                 # =========================================================
+                if current_step is not None and captured_step is not None:
+                    lag = current_step - captured_step
+                    # If lag is negative (impossible if clocks consistent) or too large, prune
+                    if lag > self.max_lag:
+                        logger.debug(f"  [State] PRUNED delta due to high lag ({lag} > {self.max_lag})")
+                        continue
+                    
+                    # Apply exponential decay based on lag
+                    # lag 0 -> factor 1.0
+                    # lag 1 -> factor 0.9
+                    # lag k -> factor 0.9^k
+                    lag_factor = self.delta_decay ** max(0, lag)
+                else:
+                    lag_factor = 1.0
+
+                # Combine confidence scale and lag decay
+                final_scale = []
                 
-                # Scale the injection rate by MCTS confidence.
-                # If MCTS is unsure (low value), we inject very little.
-                # effective_alpha = base_rate * confidence
-                effective_alpha = self.injection_rate * max(0.0, min(1.0, confidence))
+                if isinstance(confidence, list):
+                    # Vector confidence (per layer)
+                    for c in confidence:
+                        # Apply Sigmoid to convert value logit to probability/gate [0, 1]
+                        val = 1.0 / (1.0 + math.exp(-c)) 
+                        effective_alpha = self.injection_rate * val
+                        final_scale.append(effective_alpha * lag_factor)
+                else:
+                    # Scalar confidence
+                    # Assume it might be logit too if it comes from the same head
+                    try:
+                        c_val = float(confidence)
+                        val = 1.0 / (1.0 + math.exp(-c_val))
+                    except:
+                        val = 0.5
+                    effective_alpha = self.injection_rate * val
+                    final_scale = effective_alpha * lag_factor
                 
-                # Apply delta (Target State) to current state
-                async with self._state_lock:
-                    self.apply_state_delta(delta, scale=effective_alpha)
+                # Buffer delta (Target State) instead of applying immediately.
+                # This ensures it is applied at the exact step it was planned for.
+                self._targeted_deltas[position] = (delta, final_scale)
                 
-                logger.debug(f"  [State] Applied Gated Injection from pos {position} (Alpha: {effective_alpha:.4f}, Conf: {confidence:.2f})")
+                logger.debug(f"  [State] Buffered Targeted Injection for pos {position} (Lag: {lag if current_step else '?'}, Factor: {lag_factor:.2f})")
         except asyncio.QueueEmpty:
             pass
 
@@ -486,7 +550,9 @@ class CRSM(nn.Module):
             while not self._deliberation_requests.empty():
                 try: self._deliberation_requests.get_nowait()
                 except: pass
-        logger.info("✓ Flushed async queues")
+        
+        self._targeted_deltas.clear()
+        logger.info("✓ Flushed async queues and targeted buffer")
 
     async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
         """
@@ -516,6 +582,9 @@ class CRSM(nn.Module):
         generated_tokens = []
         
         for step in range(max_length):
+            # Update current step for worker to see
+            self._current_step_index = step
+
             # ============================================
             # ASYNC: Request deliberation (Pre-emptive)
             # ============================================
@@ -565,6 +634,13 @@ class CRSM(nn.Module):
             # Check for state updates from deliberation
             await self._apply_pending_deltas(current_step=step)
             
+            # Precise Alignment: Apply buffered delta if it matches THIS step
+            if step in self._targeted_deltas:
+                delta, final_scale = self._targeted_deltas.pop(step)
+                async with self._state_lock:
+                    self.apply_state_delta(delta, scale=final_scale)
+                logger.debug(f"  [State] Applied Targeted Injection for step {step}")
+
             # Sync local states back from shared state to ensure deltas are used
             async with self._state_lock:
                 states = [s.clone() if s is not None else None for s in self.latent_state]
@@ -602,9 +678,22 @@ class CRSM(nn.Module):
 
             suggestion, delta, confidence = await self.reasoning.deliberate(None, state_copy)
             if delta is not None:
-                effective_alpha = self.injection_rate * max(0.0, min(1.0, confidence))
+                # Handle list confidence here too
+                final_scale = []
+                if isinstance(confidence, list):
+                    for c in confidence:
+                        val = 1.0 / (1.0 + math.exp(-c))
+                        final_scale.append(self.injection_rate * val)
+                else:
+                    try:
+                        c_val = float(confidence)
+                        val = 1.0 / (1.0 + math.exp(-c_val))
+                    except:
+                        val = 0.5
+                    final_scale = self.injection_rate * val
+                
                 async with self._state_lock:
-                    self.apply_state_delta(delta, scale=effective_alpha)
+                    self.apply_state_delta(delta, scale=final_scale)
 
             await asyncio.sleep(0.1)
             

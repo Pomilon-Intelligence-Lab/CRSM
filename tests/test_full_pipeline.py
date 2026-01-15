@@ -26,7 +26,8 @@ def temp_dir():
 def test_latent_dynamics_module():
     """Test that LatentDynamics module works"""
     d_model = 32
-    dynamics = LatentDynamics(d_model=d_model)
+    num_layers = 2
+    dynamics = LatentDynamics(d_model=d_model, num_layers=num_layers)
     
     # Test forward pass
     state = torch.randn(1, d_model)
@@ -54,7 +55,7 @@ def test_dynamics_distillation_minimal():
     ).to(device)
     
     # Create dynamics
-    dynamics = LatentDynamics(d_model=d_model).to(device)
+    dynamics = LatentDynamics(d_model=d_model, num_layers=2).to(device)
     
     # Collect a few transitions
     transitions = []
@@ -114,7 +115,7 @@ def test_crsm_with_dynamics():
     )
     
     # Add dynamics
-    crsm.dynamics = LatentDynamics(d_model=d_model)
+    crsm.dynamics = LatentDynamics(d_model=d_model, num_layers=2)
     
     # Test that reasoning uses dynamics
     device = next(crsm.parameters()).device
@@ -145,7 +146,7 @@ def test_reasoning_with_dynamics():
     ).to(device)
     
     # Add dynamics attribute (simulating CRSM structure)
-    backbone.dynamics = LatentDynamics(d_model=d_model).to(device)
+    backbone.dynamics = LatentDynamics(d_model=d_model, num_layers=2).to(device)
     
     from crsm.reasoning import AsyncDeliberationLoop
     reasoning = AsyncDeliberationLoop(backbone, n_simulations=2)
@@ -174,7 +175,7 @@ def test_load_dynamics_into_crsm(temp_dir):
     d_model = 32
     
     # Create and save dynamics
-    dynamics = LatentDynamics(d_model=d_model)
+    dynamics = LatentDynamics(d_model=d_model, num_layers=2)
     dynamics_path = temp_dir / 'dynamics.pt'
     
     torch.save({
@@ -214,7 +215,7 @@ def test_check_dynamics_quality():
         d_ffn=64,
         num_layers=2
     )
-    crsm.dynamics = LatentDynamics(d_model=d_model)
+    crsm.dynamics = LatentDynamics(d_model=d_model, num_layers=2)
     
     # Check quality (with few samples for speed)
     stats = check_dynamics_quality(crsm, test_samples=5)

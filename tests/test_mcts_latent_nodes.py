@@ -20,11 +20,14 @@ def test_mcts_expansion_from_latent_state():
     assert root.state_cache is latent
 
     # Get policy logits and value from latent states
-    logits, value, _ = m.predict_from_states(latent)
+    logits, values, _ = m.predict_from_states(latent)
     last_logits = logits[0, -1]
+    
+    # values is now a list of tensors for Multi-Headed Critic
+    value_list = [v.item() for v in values]
 
     # Expand root; children states should be produced via model.step inside _get_next_state
-    loop.expand_node(root, last_logits, float(value.item()) if hasattr(value, 'item') else float(value))
+    loop.expand_node(root, last_logits, value_list)
 
     assert len(root.children) > 0
 
