@@ -1,6 +1,6 @@
 import tempfile
 from pathlib import Path
-from crsm.dataset import StreamingTextDataset
+from crsm.data.datasets import StreamingTextDataset
 
 
 def test_streaming_from_files():

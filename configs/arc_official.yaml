@@ -1,0 +1,16 @@
+# ARC-AGI Official Dataset configuration
+vocab_size: 100
+hidden_size: 128
+num_hidden_layers: 4
+d_state: 32
+intermediate_size: 512
+batch_size: 8
+lr: 1e-4
+epochs: 5
+seq_len: 1024
+arc_data_path: "data/arc_official/data/training"
+arc_eval_path: "data/arc_official/data/evaluation"
+device: "cpu" # Default to cpu for safe execution, override if needed
+grad_accum_steps: 1
+clip_grad_norm: 1.0
+use_amp: false

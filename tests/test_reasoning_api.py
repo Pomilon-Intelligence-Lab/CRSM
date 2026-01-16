@@ -1,7 +1,7 @@
 import torch
 
-from crsm.mamba_ssm import MambaModel
-from crsm.reasoning import AsyncDeliberationLoop
+from crsm.core.mamba import MambaModel
+from crsm.core.reasoning import AsyncDeliberationLoop
 
 
 def test_deliberate_sync_returns_action():

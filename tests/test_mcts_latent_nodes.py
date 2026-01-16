@@ -1,7 +1,7 @@
 import torch
 
-from crsm.mamba_ssm import MambaModel
-from crsm.reasoning import AsyncDeliberationLoop, MCTSNode
+from crsm.core.mamba import MambaModel
+from crsm.core.reasoning import AsyncDeliberationLoop, MCTSNode
 
 
 def test_mcts_expansion_from_latent_state():

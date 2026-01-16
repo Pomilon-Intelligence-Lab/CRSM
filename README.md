@@ -7,7 +7,10 @@
 
 Standard Transformers typically face a latency trade-off: to perform "System 2" reasoning (deep planning), they must generate intermediate tokens ("System 1" output), which increases latency and computational cost.
 
-**CRSM** explores an alternative approach: decoupling reasoning from generation. It combines a **Mamba** backbone (efficient linear-time memory) with an **Asynchronous MCTS** planner. This "thinking module" runs in the background, exploring future possibilities and injecting "thought vectors" into the main model's state in real-time.
+**CRSM** explores an alternative approach: decoupling reasoning from generation. It combines a **Mamba** backbone (efficient linear-time memory) with an **Asynchronous MCTS** planner.
+
+### 🎯 ARC-AGI Focus
+The project is currently optimized for benchmarking on **ARC-AGI**, targeting **Nano-scale implementations (100k - 500k parameters)**. The modular architecture allows for rapid iteration on different reasoning strategies and task-specific logic (e.g., Grid-based spatial reasoning).
 
 ---
 
@@ -16,8 +19,6 @@ Standard Transformers typically face a latency trade-off: to perform "System 2" 
 *   **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: A detailed look at the Backbone, Dynamics, and Planner integration.
 *   **[Visual Architecture Diagram](docs/ARCHITECTURE_DIAGRAM.md)**: Schematic of the asynchronous interaction loop.
 *   **[Technical Retrospective](docs/technical_report.md)**: An informal discussion on the engineering challenges and lessons learned.
-*   **[Usage & Training Guide](docs/USAGE.md)**: Instructions for inference and the multi-stage training pipeline.
-*   **[Installation Guide](docs/INSTALL.md)**: Environment setup.
 *   **[Project Roadmap](docs/ROADMAP.md)**: Current capabilities and future research goals.
 
 ---
@@ -49,28 +50,31 @@ pip install -e .
 
 ### Autonomous Inference
 
-> **Note:** This repository contains the architecture and training code. Pre-trained weights are not yet available (see Roadmap). Running inference now will use an untrained model with random weights, producing random tokens.
-
 Run the model with the "Thinking" loop active:
 
 ```python
 import torch
 import asyncio
-from crsm.model import CRSMModel, CRSMConfig
+from crsm.core import CRSMModel, CRSMConfig
 
 async def main():
-    # 1. Load Model (0.05 injection rate is the current experimental sweet spot)
-    config = CRSMConfig(vocab_size=50257, injection_rate=0.05)
+    # 1. Load Model (Nano configuration)
+    config = CRSMConfig(
+        vocab_size=1024, 
+        hidden_size=256, 
+        num_hidden_layers=4,
+        injection_rate=0.05
+    )
     model = CRSMModel(config).cuda()
     
     # 2. Generate with Asynchronous Deliberation
-    prompt = torch.tensor([[502, 10, 99]]).cuda()
+    prompt = torch.tensor([[10, 20, 30]]).cuda()
     
-    output = await model.crsm.think_and_generate(
+    output = await model.think_and_generate(
         prompt, 
-        max_length=100, 
-        use_deliberation=True,  # <--- Activates the background MCTS thread
-        deliberation_lag=3      # Plan 3 tokens into the future
+        max_length=50, 
+        use_deliberation=True,
+        deliberation_lag=3
     )
     print("Generated:", output)
 
@@ -78,33 +82,34 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
----
+## Usage
 
-## 🛠️ Training Pipeline
+### Unified Benchmarking & Validation
+The central tool for verifying both functional and operational validity is `scripts/eval/benchmark.py`. It automates backbone training, subconscious reasoning training, and ablation studies.
 
-The architecture requires a 4-stage training pipeline to function correctly (orchestrated by scripts in `scripts/training/`):
-
-1.  **Backbone Pre-training**: Standard CLM training for the Mamba model (`scripts/training/stage_1_backbone.py`).
-2.  **Dynamics Distillation**: Training a small MLP to predict state transitions ($h_t \to h_{t+1}$) from the frozen backbone (`scripts/training/stage_2_dynamics.py`).
-3.  **Value Head Fine-tuning**: Training the planner's value estimator to recognize high-quality states (`scripts/training/stage_3_value_head.py`).
-4.  **Assembly**: Integrating the trained components (Backbone + Dynamics) into a unified artifact (`scripts/training/stage_4_assembly.py`).
-
-To run the full pipeline on a small baseline:
+#### 1. Synthetic Sanity Check (Fast)
+Verify the architecture can learn identity and simple translations:
 ```bash
-# Stage 1: Train Backbone
-python scripts/training/stage_1_backbone.py --config configs/baseline_27m.yaml
-
-# Stage 2: Distill Dynamics
-python scripts/training/stage_2_dynamics.py --config configs/baseline_27m.yaml
-
-# Stage 3: Train Value Head
-python scripts/training/stage_3_value_head.py --config configs/baseline_27m.yaml
-
-# Stage 4: Assembly
-python scripts/training/stage_4_assembly.py --config configs/baseline_27m.yaml
+python scripts/eval/benchmark.py --config configs/arc_nano.yaml --type sanity
 ```
 
----
+#### 2. Official ARC-AGI Benchmark
+Run the full pipeline on the official fchollet/ARC dataset:
+```bash
+python scripts/eval/benchmark.py --config configs/arc_official.yaml --type official
+```
+
+### Understanding Operational Proofs
+The benchmark reports two critical signals of "Working Reasoning":
+1.  **Discrimination Accuracy:** Measures if the Multi-Headed Value Critic can distinguish correct states from noisy ones. An accuracy > 50% proves the subconscious is **learning to judge**.
+2.  **MCTS Improvement Delta:** The performance gain of MCTS over Greedy search. A positive delta proves the search engine is **operationally steering** the model towards better solutions.
+
+### Training
+To train a model on general tasks using the modular trainer:
+```bash
+python run.py --task lm --config configs/training_config.yaml
+```
+
 
 ## 🧪 Verification
 

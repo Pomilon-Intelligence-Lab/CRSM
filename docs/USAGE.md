@@ -14,7 +14,7 @@ pip install -e .
 
 ```python
 import torch
-from crsm.model import CRSMModel, CRSMConfig
+from crsm.core import CRSMModel, CRSMConfig
 
 # Load model
 config = CRSMConfig(vocab_size=50257, injection_rate=0.05)
@@ -31,7 +31,31 @@ output = await model.crsm.think_and_generate(
 print(output)
 ```
 
-## Training
+# ARC-AGI Benchmarking
+
+CRSM includes a specialized benchmarking suite for grid-based reasoning tasks.
+
+### 1. Generate Sanity Tasks
+```bash
+python crsm/data/arc_gen.py
+```
+This generates synthetic tasks in `data/arc_sanity/` including Identity, Reflection, and Scaling.
+
+### 2. Run Phase 1 (Sanity)
+Evaluates the model's ability to learn deterministic rules and grid syntax.
+```bash
+python scripts/eval/arc_benchmark.py --config configs/arc_nano.yaml --phase 1 --seeds 42 43 44
+```
+
+### 3. Run Phase 2 (Ablations)
+Compares the full reasoning model against greedy decoding and models without critics/projection.
+```bash
+python scripts/eval/arc_benchmark.py --config configs/arc_nano.yaml --phase 2
+```
+
+---
+
+## 🛠️ Training Pipeline
 
 ### 1. Prepare Data
 

@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, '.')
 
-from crsm.model import CRSM
-from crsm.tokenizer import Tokenizer
+from crsm.core import CRSM
+from crsm.data.tokenizers import Tokenizer
 
 async def generate(model, prompt_ids, device, delta=None):
     prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)

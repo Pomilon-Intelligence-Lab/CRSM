@@ -3,7 +3,7 @@ import asyncio
 import pytest
 import torch
 import time
-from crsm.model import CRSM, CRSMConfig
+from crsm.core import CRSM, CRSMConfig
 
 class MockBackbone(torch.nn.Module):
     def __init__(self):
@@ -17,7 +17,14 @@ class MockBackbone(torch.nn.Module):
         # Always predict token 1
         logits = torch.zeros(1, 1, 100)
         logits[0, 0, 1] = 10.0
+        if states is None:
+            states = self.init_state()
         return logits, states
+
+    def step(self, x, states=None):
+        if states is None:
+            states = self.init_state()
+        return self.forward(x, states)
 
     def embedding(self, x):
         return torch.randn(1, 1, 16) # Dummy embedding

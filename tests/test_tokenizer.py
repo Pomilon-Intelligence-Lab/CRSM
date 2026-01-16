@@ -1,6 +1,6 @@
 import pytest
 
-from crsm.tokenizer import Tokenizer
+from crsm.data.tokenizers import Tokenizer
 
 
 def test_simple_tokenizer_roundtrip():

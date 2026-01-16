@@ -80,7 +80,7 @@ python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA ava
 pytest tests/ -v
 
 # Or quick import test
-python -c "from crsm.model import CRSMConfig, CRSMModel; print('CRSM imports OK')"
+python -c "from crsm.core import CRSMConfig, CRSMModel; print('CRSM imports OK')"
 ```
 
 ## Advanced Configurations
@@ -233,14 +233,14 @@ chmod -R u+w venv/
 ### 1. Test the Installation
 
 ```bash
-python -c "from crsm.model import CRSMConfig, CRSMModel; print('✓ CRSM ready')"
+python -c "from crsm.core import CRSMConfig, CRSMModel; print('✓ CRSM ready')"
 ```
 
 ### 2. Run a Simple Example
 
 ```python
 import torch
-from crsm.model import CRSMConfig, CRSMModel
+from crsm.core import CRSMConfig, CRSMModel
 
 # Create model
 config = CRSMConfig()

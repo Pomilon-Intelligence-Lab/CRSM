@@ -211,13 +211,31 @@ class AsyncDeliberationLoop:
             return torch.tensor([action], device=device)
     
     def backpropagate(self, node: MCTSNode, value: float, path: List[int]):
-        """Update statistics of visited nodes"""
+        """Update statistics of visited nodes with Structural Verification"""
+        
+        # Operational Verification: Check if this path completes an invalid grid
+        # Tokens: 13=ROW_END, 14=GRID_END, 16-45=Rows, 46-75=Cols
+        if path and path[-1] == 14:
+            # We check the structure of the path
+            rows_header = -1
+            cols_header = -1
+            row_count = 0
+            
+            # Find headers in the path (very simplified check)
+            for t in path:
+                if 16 <= t <= 45: rows_header = t - 15
+                if 46 <= t <= 75: cols_header = t - 45
+                if t == 13: row_count += 1
+            
+            if rows_header > 0 and row_count != rows_header:
+                # Structural Failure: Wrong number of rows
+                value = [0.0] * len(value) if isinstance(value, list) else 0.0
+
         cur = node
         while cur is not None:
             cur.visit_count += 1
             if isinstance(value, list):
                 if cur.layer_value_sums is None:
-                    # Initialize with zeros for each layer
                     cur.layer_value_sums = [0.0] * len(value)
                 for i, v in enumerate(value):
                     cur.layer_value_sums[i] += v

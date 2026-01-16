@@ -1,6 +1,6 @@
 import torch
 
-from crsm.model import CRSM
+from crsm.core import CRSM
 
 
 def test_crsm_init_latent_and_apply():

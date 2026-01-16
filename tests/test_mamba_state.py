@@ -1,6 +1,6 @@
 import torch
 
-from crsm.mamba_ssm import MambaModel
+from crsm.core.mamba import MambaModel
 
 
 def test_init_state_and_step():

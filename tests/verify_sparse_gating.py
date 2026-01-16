@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import math
 import asyncio
-from crsm.model import CRSM, CRSMConfig
-from crsm.mamba_ssm import MambaModel
+from crsm.core import CRSM, CRSMConfig
+from crsm.core.mamba import MambaModel
 
 def test_sparse_gating():
     print("Initializing CRSM for Sparse Gating Verification...")

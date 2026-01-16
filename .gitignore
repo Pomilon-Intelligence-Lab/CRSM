@@ -60,7 +60,10 @@ logs/
 runs/
 
 # Data
-data/
+data/dummy_data
+data/text_corpus
+data/arc_sanity
+data/arc_official
 *.csv
 cache/
 huggingface/

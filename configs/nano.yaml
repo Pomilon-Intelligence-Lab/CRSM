@@ -1,0 +1,10 @@
+# Ultra-Nano config for ARC-AGI benchmarking
+vocab_size: 1024
+hidden_size: 32
+num_hidden_layers: 2
+d_state: 8
+intermediate_size: 64
+batch_size: 8
+lr: 1e-3
+epochs: 5
+seq_len: 32

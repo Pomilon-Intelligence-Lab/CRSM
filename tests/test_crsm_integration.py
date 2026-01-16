@@ -3,7 +3,7 @@ import pytest
 import pytest_asyncio
 
 # Assuming the 'crsm' package is in the root or installed
-from crsm.model import CRSM
+from crsm.core import CRSM
 
 # --- Pytest Fixture ---
 

@@ -22,7 +22,7 @@ import shutil
 
 sys.path.insert(0, '.')
 
-from crsm.model import CRSM, CRSMConfig
+from crsm.core import CRSM, CRSMConfig
 
 def load_config(config_path):
     with open(config_path, 'r') as f:

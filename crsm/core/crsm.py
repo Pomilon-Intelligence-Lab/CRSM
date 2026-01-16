@@ -13,11 +13,11 @@ import uuid
 import math
 from typing import Optional, Tuple, List, Dict, Union
 from dataclasses import dataclass
-from .logger import logger
+from ..training.logger import logger
 
-from .mamba_ssm import MambaModel
+from .mamba import MambaModel
 from .reasoning import AsyncDeliberationLoop
-from .latent_dynamics import LatentDynamics
+from .dynamics import LatentDynamics
 
 @dataclass
 class CRSMConfig:
@@ -557,99 +557,123 @@ class CRSM(nn.Module):
     async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
         """
         Generate tokens with asynchronous deliberation.
-        
-        Args:
-            use_deliberation: Enable background MCTS
-            deliberation_lag: Tokens ahead to deliberate (0=synchronous, 3=async)
-            fallback_to_sampling: If True, use sampling when deliberation isn't ready
-                                  If False, wait for deliberation (slower but more thoughtful)
         """
         self._ensure_async_components()
         
-        # Start background deliberation task
         if use_deliberation:
             self._start_background_deliberation()
         
-        # NEW: Flush queues and set generation ID
         self._flush_queues()
         self.current_generation_id = str(uuid.uuid4())
         logger.info(f"Starting generation session: {self.current_generation_id}")
 
-        current_sequence = prompt.clone()
-        states = self.backbone.init_state(batch_size=1, device=prompt.device)
-        self.latent_state = states
+        # 1. PREFILL: Process the prompt to get initial state
+        # We process the prompt *without* passing existing states (since it's the start)
+        # to get the state at the end of the prompt.
+        with torch.no_grad():
+            logits, states = self.backbone(prompt) # states=None implicit
         
-        generated_tokens = []
+        # Determine the first token to generate based on the last token of prompt
+        # Actually, we need to loop for generation.
+        # Initialize loop variables
+        current_sequence = prompt.clone()
+        self.latent_state = states # Sync for MCTS
+        
+        # Last token of prompt is the input for the first generation step?
+        # No, 'logits' from prefill contains prediction for next token at the last position.
+        # But we enter the loop to deliberate/sample.
+        
+        # We need to handle the first step carefully. 
+        # The loop expects to generate *new* tokens.
+        # But we already have the logits for the *first* new token from prefill.
+        # However, the loop structure below assumes we step *into* the loop.
+        
+        # Let's adjust the loop to generate 'max_length' tokens.
+        # We need to feed the *last generated/prompt* token to the model in each step.
+        
+        next_input_token = prompt[:, -1:]
         
         for step in range(max_length):
-            # Update current step for worker to see
             self._current_step_index = step
 
             # ============================================
-            # ASYNC: Request deliberation (Pre-emptive)
+            # ASYNC: Request deliberation
             # ============================================
             if use_deliberation:
-                # If lag is 0, we want to deliberate on THIS token immediately.
-                # If lag > 0, we are pipelining for future.
                 future_position = step + deliberation_lag
                 self._request_deliberation(future_position, current_sequence.clone())
 
             # ============================================
-            # FAST PATH: Generate token immediately
+            # GENERATION (Single Step)
             # ============================================
-            with torch.no_grad():
-                logits, states = self.backbone(current_sequence, states)
+            # In the first step (step=0), we already computed logits for prompt[:, -1] in prefill?
+            # Wait, Mamba's forward(prompt) returns logits for [T1, T2, ... Tn+1].
+            # The last logit corresponds to the prediction after seeing the whole prompt.
+            # So for step 0, we don't need to run the model *again* if we use the prefill logits.
+            # BUT, we might want to apply deliberation deltas *before* sampling.
             
-            # Check if deliberation has a suggestion (non-blocking)
+            # Simplified Logic:
+            # We run the model on the *last token* to get the next logits.
+            # For step 0, we rely on the prefill state, but we haven't 'stepped' with the last token yet?
+            # No, forward(prompt) processes *all* tokens. The state is after the *last* token.
+            # So the logits for the *next* token are already available in 'logits[:, -1, :]'.
+            
+            # However, the loop structure below is easier if we always step.
+            # Let's say we rely on the prefill logits for the first iteration?
+            # Or we re-run the last token? No, that's redundant.
+            
+            # Let's just use the logits we have (from prefill or previous step).
+            pass # Logits are ready from previous block
+            
+            # Check for deliberation
             if use_deliberation:
                 if fallback_to_sampling:
-                    # Non-blocking: use suggestion if ready, else sample
                     suggestion = self._get_suggestion(step, timeout=0)
                 else:
-                    # Blocking: wait for deliberation (original behavior)
-                    suggestion = self._get_suggestion(step, timeout=1.0)  # Wait up to 1s
+                    suggestion = self._get_suggestion(step, timeout=1.0)
             else:
                 suggestion = None
             
             if suggestion is not None:
-                # Use deliberated action
                 next_token, confidence = suggestion
-                logger.debug(f"  [MCTS] Using deliberated token {next_token} (conf: {confidence:.2f})")
+                logger.debug(f"  [MCTS] Using deliberated token {next_token}")
             else:
-                # Fallback to sampling (instant)
-                next_token = self.sample_next_token(logits[0, -1])
-                logger.debug(f"  [Sample] Using sampled token {next_token}")
+                # Use logits from previous step (or prefill)
+                # logits shape (B, Seq, V). We want last step.
+                next_token = self.sample_next_token(logits[:, -1, :])
             
-            # Update sequence
+            # Append to sequence
             token_tensor = torch.tensor([[next_token]], device=prompt.device)
             current_sequence = torch.cat([current_sequence, token_tensor], dim=1)
-            generated_tokens.append(next_token)
             
             # ============================================
-            # ASYNC: Update shared state (non-blocking)
+            # STATE UPDATE (Prepare for next step)
             # ============================================
+            # Now we must advance the state with this new token 'next_token'
+            # This prepares 'logits' and 'states' for the NEXT iteration.
+            
             async with self._state_lock:
                 self.latent_state = [s.clone() if s is not None else None for s in states]
             
-            # Check for state updates from deliberation
             await self._apply_pending_deltas(current_step=step)
             
-            # Precise Alignment: Apply buffered delta if it matches THIS step
             if step in self._targeted_deltas:
                 delta, final_scale = self._targeted_deltas.pop(step)
                 async with self._state_lock:
                     self.apply_state_delta(delta, scale=final_scale)
-                logger.debug(f"  [State] Applied Targeted Injection for step {step}")
 
-            # Sync local states back from shared state to ensure deltas are used
+            # Sync local states
             async with self._state_lock:
                 states = [s.clone() if s is not None else None for s in self.latent_state]
+                
+            # Run model for NEXT step (Step T -> T+1)
+            with torch.no_grad():
+                # CRITICAL FIX: Only pass the NEW token (next_token) and the current state.
+                logits, states = self.backbone.step(token_tensor, states)
 
-        # Stop background task
         if use_deliberation:
             self._stop_background_deliberation()
         
-        # return torch.tensor(generated_tokens, device=prompt.device)
         return current_sequence.squeeze(0)
     
     def start_autonomous_thinking(self):
