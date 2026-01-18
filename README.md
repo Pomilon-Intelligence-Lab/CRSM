@@ -1,200 +1,94 @@
 # CRSM: Continuous Reasoning State Model
 
-> ⚠️ **STATUS: EXPERIMENTAL PROTOTYPE**
-> This is a research experiment exploring whether a continuous background planner can guide a language model without pausing generation. While the core "Gated State Injection" mathematics have been verified for stability, the model is currently a proof-of-concept.
+> ⚠️ **EXPERIMENTAL PROTOTYPE**
+> A research project testing if a background search process (MCTS) can steer a Mamba model's hidden states in real-time without stopping generation.
 
-**Exploring Asynchronous "System 2" Reasoning with Mamba**
+## The Core Concept: "Thinking" Without Tokens
 
-Standard Transformers typically face a latency trade-off: to perform "System 2" reasoning (deep planning), they must generate intermediate tokens ("System 1" output), which increases latency and computational cost.
+Standard models face a trade-off: to "think" deeply (System 2), they must write out a "Chain of Thought." This is slow and consumes tokens.
 
-**CRSM** explores an alternative approach: decoupling reasoning from generation. It combines a **Mamba** backbone (efficient linear-time memory) with an **Asynchronous MCTS** planner.
-
-### 🎯 ARC-AGI Focus
-The project is currently optimized for benchmarking on **ARC-AGI**, targeting **Nano-scale implementations (100k - 500k parameters)**. The modular architecture allows for rapid iteration on different reasoning strategies and task-specific logic (e.g., Grid-based spatial reasoning).
+**CRSM** moves this process into the background. It uses a **Mamba** backbone (fast generation) and an **Asynchronous MCTS** planner (look-ahead search). Instead of writing text, the planner directly edits the model's internal memory (hidden states) as it types.
 
 ---
 
-## 📚 Documentation Hub
+## 🛠 Architectural Breakdown
 
-*   **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: A detailed look at the Backbone, Dynamics, and Planner integration.
-*   **[Visual Architecture Diagram](docs/ARCHITECTURE_DIAGRAM.md)**: Schematic of the asynchronous interaction loop.
-*   **[Technical Retrospective](docs/technical_report.md)**: An informal discussion on the engineering challenges and lessons learned.
-*   **[Project Roadmap](docs/ROADMAP.md)**: Current capabilities and future research goals.
-
----
-
-## 💡 Key Architectural Experiments
-
-### 1. Sparse-Gated Hierarchical Injection
-To maintain stability while allowing deep planning, CRSM uses **Sparse-Gated Injection**. Each layer in the Mamba hierarchy is treated as a sovereign entity with its own "gate." The planner injects state updates independently into each layer based on its specific confidence.
-$$h_{i,t} \leftarrow (1 - \alpha_{i}) \cdot h_{i,t} + \alpha_{i} \cdot h_{i,target}$$
-This allows the planner to aggressively update high-level strategy layers (Layer 24) while leaving low-level sensory features (Layer 1) untouched.
-
-### 2. Forward-Projected Planning (Alignment)
-Planning takes time. In an asynchronous system, by the time MCTS finds a better state $S_t$, the generator has already moved to $S_{t+3}$. CRSM solves this via **Forward Projection**: the planner uses its internal dynamics model to "fast-forward" the current state to the target position before starting the search. Updates are then held in a **Targeted Delta Buffer** and applied at the exact micro-second they align with the generation loop.
-
-### 3. Multi-Headed Consensus & Uncertainty
-Instead of a single "Value Head," CRSM employs a **Multi-Headed Value Critic (MV-Critic)**, one for every layer. The planner's utility score is a weighted consensus of these heads. If the layers disagree (high variance in values), the system applies an **Uncertainty Penalty**, favoring reasoning paths that are stable across all levels of abstraction.
+| Component | What it actually is |
+| --- | --- |
+| **System 1 Backbone** | A standard **Mamba SSM**. It handles fast, instinctive text generation. |
+| **System 2 Planner** | An **MCTS** loop running on a separate thread/process to simulate future paths. |
+| **State Blending** | A function that mixes the model's current state with the planner's "better" state. |
+| **Latency Buffer** | It "fast-forwards" the planner's advice to match the model's current token position. |
+| **Consensus Heads** | A committee of **Value Heads** that decide if a reasoning path is actually stable. |
 
 ---
 
-## ⚡ Quick Start
+## 🔬 Core Mechanics
+
+### 1. Weighted State Blending (Layer-by-Layer)
+
+We don't force-feed the model. Instead, we use a simple "mix" ratio () at each layer to determine how much the planner's advice should override the model's intuition.
+
+
+* **High Influence ():** Higher-level strategy layers are heavily corrected by the planner.
+* **Low Influence ():** Lower-level syntax and grammar layers are left untouched to ensure fluid text.
+
+### 2. The Latency Buffer (Forward Projection)
+
+Planning takes time. By the time the search loop finds a better state, the generator is already 3 tokens ahead. CRSM uses a lightweight **Dynamics Model** to "fast-forward" the planner’s target state so it aligns perfectly with the model’s current position when the update is applied.
+
+### 3. Uncertainty Penalties
+
+If the different layers of the model disagree on whether a path is good, the system applies an **Uncertainty Penalty**. This effectively tells the planner: "If the layers aren't in consensus, don't change the state," preventing the search from accidentally breaking the model's logic.
+
+---
+
+## 📚 References & Inspirations
+
+### Core Foundations
+
+* **Mamba (SSM):** Gu, A., & Dao, T. (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces.* [arXiv:2312.00752](https://arxiv.org/abs/2312.00752)
+* **Latent Planning (MuZero):** Schrittwieser, J., et al. (2019). *Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model.* [arXiv:1911.08265](https://arxiv.org/abs/1911.08265)
+* **System 1 & 2:** Kahneman, D. (2011). *Thinking, Fast and Slow.*
+
+### State Steering & Reasoning
+
+* **Chain of Continuous Thought (Coconut):** Hao, S., et al. (2024). *Training Language Models to Reason in a Continuous Latent Space.* [arXiv:2412.06769](https://arxiv.org/abs/2412.06769)
+* **Representation Engineering (RepE):** Zou, A., et al. (2023). *Representation Engineering: A Top-Down Approach to AI Transparency.* [arXiv:2310.01405](https://arxiv.org/abs/2310.01405)
+* **Quiet-STaR:** Zelikman, E., et al. (2024). *Quiet-STaR: Language Models Can Teach Themselves to Think Before Speaking.* [arXiv:2403.09629](https://arxiv.org/abs/2403.09629)
+
+### Technical Mechanics
+
+* **Speculative Decoding:** Leviathan, Y., et al. (2022). *Fast Inference from Transformers via Predictive Sampling.* [arXiv:2211.17192](https://arxiv.org/abs/2211.17192)
+* **JEPA Architecture:** LeCun, Y. (2023). *A Path Towards Autonomous Machine Intelligence.* [Meta AI Research](https://ai.meta.com/blog/yann-lecun-ai-model-i-jepa/)
+* **Soft Target Updates:** Lillicrap, T. P., et al. (2015). *Continuous Control with Deep Reinforcement Learning.* [arXiv:1509.02971](https://arxiv.org/abs/1509.02971)
+
+---
+
+## 🚀 Quick Start
 
 ### Installation
 
 ```bash
 git clone https://github.com/Pomilon-Intelligence-Lab/CRSM.git
-cd CRSM
-pip install -e .
+cd CRSM && pip install -e .
+
 ```
 
-### Autonomous Inference
-
-Run the model with the "Thinking" loop active:
+### Inference with Deliberation
 
 ```python
-import torch
-import asyncio
-from crsm.core import CRSMModel, CRSMConfig
+output = await model.think_and_generate(
+    prompt, 
+    max_length=50, 
+    use_deliberation=True, # Activates the background search
+    deliberation_lag=3     # Latency buffer window
+)
 
-async def main():
-    # 1. Load Model (Nano configuration)
-    config = CRSMConfig(
-        vocab_size=1024, 
-        hidden_size=256, 
-        num_hidden_layers=4,
-        injection_rate=0.05
-    )
-    model = CRSMModel(config).cuda()
-    
-    # 2. Generate with Asynchronous Deliberation
-    prompt = torch.tensor([[10, 20, 30]]).cuda()
-    
-    output = await model.think_and_generate(
-        prompt, 
-        max_length=50, 
-        use_deliberation=True,
-        deliberation_lag=3
-    )
-    print("Generated:", output)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-## Usage
-
-### Unified Benchmarking & Validation
-The central tool for verifying both functional and operational validity is `scripts/eval/benchmark.py`. It automates backbone training, subconscious reasoning training, and ablation studies.
-
-#### 1. Synthetic Sanity Check (Fast)
-Verify the architecture can learn identity and simple translations:
-```bash
-python scripts/eval/benchmark.py --config configs/arc_nano.yaml --type sanity
-```
-
-#### 2. Official ARC-AGI Benchmark
-Run the full pipeline on the official fchollet/ARC dataset:
-```bash
-python scripts/eval/benchmark.py --config configs/arc_official.yaml --type official
-```
-
-### Understanding Operational Proofs
-The benchmark reports two critical signals of "Working Reasoning":
-1.  **Discrimination Accuracy:** Measures if the Multi-Headed Value Critic can distinguish correct states from noisy ones. An accuracy > 50% proves the subconscious is **learning to judge**.
-2.  **MCTS Improvement Delta:** The performance gain of MCTS over Greedy search. A positive delta proves the search engine is **operationally steering** the model towards better solutions.
-
-### Training
-To train a model on general tasks using the modular trainer:
-```bash
-python run.py --task lm --config configs/training_config.yaml
-```
-
-
-## 🧪 Verification
-
-The repository includes a test suite to verify the stability of the state injection math and the functionality of the components.
-
-*   **Architecture Stability**: `tests/test_architecture_stability.py` (Verifies Gated Injection properties).
-*   **Capabilities**: `tests/verify_capabilities.py` (Basic capability checks).
-
-Run the core stability verification:
-```bash
-python tests/test_architecture_stability.py
 ```
 
 ---
-
-## 🧬 Project Origins & Transparency
-
-This project follows a **"Centaur" workflow**—combining human direction and engineering with AI-assisted research.
-
-**The Spark:**
-The core concept—replacing linear token-based planning with a continuous "thinking module"—originated from a research session I conducted with **Gemini 2.5 Flash**.
-
-**Original Prompt:**
-> "Help me research ways to develop the next SOTA open-source mode. My idea is that instead of relying on architectures like Transformers, which just predict linearly the next token in a sequence and thinks in the tokens that it generates... we could develop a new architecture that instead includes an internal reasoning component or a thinking module..."
-
-**Development Process:**
-*   **Foundational Research:** The initial feasibility study and architectural concepts were generated by AI and are preserved in `docs/FOUNDATIONAL_RESEARCH.md`.
-*   **Implementation:** I utilized LLMs (ChatGPT, Claude, Gemini) to assist in drafting complex component code.
-*   **Verification & Engineering:** I personally handled the system integration, testing, debugging, and critical mathematical verification (such as the "Gated Injection" solution).
-
-I believe this transparency is important to accurately represent the collaborative nature of modern experimental coding.
-
----
-
-## 🧠 Inspirations & Acknowledgements
-
-This project is an experimental synthesis of existing breakthrough research. It attempts to combine these distinct ideas into a unified architecture. I claim no credit for the foundational concepts, only for the specific implementation of their integration (CRSM).
-
-### Core Theoretical Foundations
-*   **[MuZero (Schrittwieser et al., DeepMind)](https://arxiv.org/abs/1911.08265)**: The primary inspiration for performing **Monte Carlo Tree Search (MCTS)** entirely within a learned **latent space**, without decoding back to observations. CRSM adapts this "planning in latent space" concept to the continuous state of a language model.
-*   **[Mamba (Gu & Dao)](https://arxiv.org/abs/2312.00752)**: The efficient **State Space Model (SSM)** backbone is the engine of this architecture. Its fixed-size, linear-time state enables the direct state manipulation and injection that would be computationally prohibitive with the KV-cache of Transformers.
-*   **[Tree of Thoughts (Yao et al.)](https://arxiv.org/abs/2305.10601)** & **[Chain of Thought (Wei et al.)](https://arxiv.org/abs/2201.11903)**: The inspiration for treating reasoning as a search problem over a space of intermediate steps. CRSM attempts to make this search internal and continuous rather than external and discrete.
-
-### Cognitive Frameworks
-*   **[System 1 & System 2 (Daniel Kahneman)](https://en.wikipedia.org/wiki/Thinking,_Fast_and_Slow)**: The guiding conceptual framework.
-    *   **System 1 (Intuition):** Represented by the Mamba backbone (fast, heuristic generation).
-    *   **System 2 (Deliberation):** Represented by the Asynchronous MCTS planner (slow, logical search).
-*   **[Global Workspace Theory (Baars)](https://en.wikipedia.org/wiki/Global_workspace_theory)**: The idea of a "working memory" where conscious processing occurs inspired the design of the **Latent State** as a shared workspace that both the planner and generator can access and modify.
-
-### Emerging Research
-*   **[Coconut (Chain of Continuous Thought)](https://arxiv.org/abs/2412.06769)**: A parallel line of research exploring reasoning in continuous latent space. While Coconut feeds the last hidden state back as input to the next step, CRSM modifies the internal state directly in real-time during the generation process.
-
-### Architectural Components
-*   **[JEPA (LeCun)](https://ai.meta.com/blog/yann-lecun-ai-model-i-jepa/)**: The design of the **Latent Dynamics Model** is heavily influenced by Joint Embedding Predictive Architectures—learning to predict the representation of the next state rather than the pixel/token details.
-*   **[World Models / Dreamer (Ha & Schmidhuber, Hafner et al.)](https://arxiv.org/abs/1803.10122)**: The concept of learning a compact model of the environment to simulate futures ("dreaming") for planning is directly implemented in CRSM's dynamics distillation pipeline.
-
-### Related Mechanics
-*   **[State Delta Communication (Tang et al.)](https://aclanthology.org/2025.emnlp-main.518/)**: While CRSM uses "state deltas" for *intra-agent* self-correction (Planner → Backbone), Tang et al. explore a similar mechanic for *inter-agent* communication, passing "state deltas" between models to convey reasoning dynamics that are lost in discrete token communication.
-
-### Related Methodologies
-*   **[Representation Engineering (RepE) (Zou et al.)](https://arxiv.org/abs/2310.01405)**: The concept of "Top-Down" control of model behavior by manipulating the latent space is central to CRSM. Our "Gated Injection" can be viewed as a control-theoretic application of RepE, where the control vector is dynamically generated by the planner rather than a static concept vector.
-*   **[Reasoning via Planning (RAP) (Hao et al.)](https://arxiv.org/abs/2305.14992)** & **[AlphaLLM (Tencent AI Lab)](https://arxiv.org/abs/2404.12253)**: These works pioneered the integration of MCTS with Large Language Models to enable self-improvement and strategic planning. CRSM builds on this by moving the planning process into the *asynchronous* and *continuous* domain.
-*   **[Plug and Play Language Models (PPLM) (Dathathri et al.)](https://arxiv.org/abs/1912.02164)** & **[Activation Addition (Turner et al.)](https://arxiv.org/abs/2308.10248)**: These works established the foundation for steering model generation by modifying hidden states (via gradients or vector addition). CRSM extends this by using a *dynamic planner* to generate the steering vectors in real-time, rather than using static vectors or classifiers.
-*   **[RLHF (Christiano et al. / OpenAI)](https://arxiv.org/abs/1706.03741)**: The methodology of training a separate **Value Head** to estimate the utility of a language model's state is adapted directly from the foundational work on Reinforcement Learning from Human Feedback.
-
-### Mathematical & Engineering Parallels
-*   **[Speculative Decoding (Leviathan et al.)](https://arxiv.org/abs/2211.17192)**: The "draft-then-verify" computational pattern in speculative decoding shares DNA with CRSM's asynchronous design. In CRSM, the "dynamics model" acts as a latent drafter, while the MCTS planner acts as a verifier/improver running in parallel.
-*   **[Polyak Averaging (Lillicrap et al.)](https://arxiv.org/abs/1509.02971)**: The Gated Injection formula ($h_{new} = (1-\tau)h + \tau h_{target}$) is mathematically identical to the "soft target updates" used in DDPG and other RL algorithms. We apply this standard control-theory technique to maintain stability in the language model's latent manifold.
-*   **[Quiet-STaR (Zelikman et al.)](https://arxiv.org/abs/2403.09629)**: This work explores generating "internal thoughts" at every token step to improve reasoning. CRSM shares this goal but seeks to make these thoughts continuous and asynchronous rather than discrete and interleaved.
-
-I am deeply grateful to the researchers behind these works for sharing their code and insights with the open-source community.
-
----
-
-## Reference (If you find this useful)
-
-```bibtex
-@software{crsm2025,
-  title = {CRSM: Continuous Reasoning State Model},
-  author = {Pomilon},
-  year = {2025},
-  url = {https://github.com/Pomilon-Intelligence-Lab/CRSM}
-}
-```
 
 ## License
 
-MIT License.
+MIT License. **Pomilon Intelligence Lab (2025)**
