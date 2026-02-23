@@ -78,10 +78,9 @@ def main():
     
     # Let's import the necessary modules.
     import torch
-    from crsm.mamba_ssm import MambaModel
-    from crsm.utils import set_seed
-    from crsm.latent_train import train as train_dynamics_model
-    from crsm.tokenizer import Tokenizer
+    from crsm.core.mamba import MambaModel
+    from crsm.training.utils import set_seed
+    from crsm.data.tokenizers import Tokenizer
     from tqdm import tqdm
 
     # Function to collect transitions (adapted from distill_dynamics.py)
@@ -203,17 +202,29 @@ def main():
     
     # Train Dynamics
     print("\nTraining Latent Dynamics Model...")
-    train_dynamics_model(
-        shards_dir=str(shards_dir),
-        d_model=config['model']['d_model'],
-        epochs=config['dynamics']['dynamics_epochs'],
-        batch_size=config['training']['batch_size'],
-        lr=float(config['dynamics']['dynamics_lr']),
-        device=device,
-        output_path=str(dynamics_path)
-    )
+    from crsm.core.dynamics import LatentDynamics
+    from crsm.tasks.distillation import DistillationTask
+    from crsm.training.trainer import Trainer
     
-    print(f"\n✓ Stage 2 Complete. Dynamics saved to {dynamics_path}")
+    dynamics_model = LatentDynamics(
+        d_model=config['model']['d_model'], 
+        num_layers=config['model']['num_layers']
+    ).to(device)
+    
+    task = DistillationTask(shards_dir=str(shards_dir))
+    optimizer = torch.optim.AdamW(dynamics_model.parameters(), lr=float(config['dynamics']['dynamics_lr']))
+    
+    trainer = Trainer(dynamics_model, optimizer, config['training'])
+    trainer.fit(task, epochs=config['dynamics']['dynamics_epochs'], checkpoint_dir=str(output_dir))
+    
+    # Standardize output for next stage
+    final_path = output_dir / 'dynamics_final.pt'
+    latest_ckpt = output_dir / f"checkpoint_epoch_{config['dynamics']['dynamics_epochs']}.pt"
+    if latest_ckpt.exists():
+        # Wrap in expected format for Stage 4
+        ckpt = torch.load(latest_ckpt)
+        torch.save({'dynamics_state': ckpt['model_state_dict']}, final_path)
+        print(f"✓ Saved final dynamics to {final_path}")
     
     # Cleanup temp data
     import shutil

@@ -1,0 +1,22 @@
+# True Nano Configuration for ARC-AGI
+# Target: ~88k parameters for maximum MCTS simulation throughput
+vocab_size: 100
+hidden_size: 64
+num_hidden_layers: 2
+intermediate_size: 128
+d_state: 16
+injection_rate: 0.2  # Increased to ensure MCTS signal overrides greedy bias
+
+# Reasoning
+n_simulations: 1000  # High-fidelity search
+c_puct: 1.5          
+
+# Training
+lr: 5e-4
+epochs: 20
+batch_size: 16
+seq_len: 1024
+
+# Task Data
+arc_data_path: "data/arc_official/training"
+arc_eval_path: "data/arc_official/evaluation"

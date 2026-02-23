@@ -11,10 +11,10 @@ import sys
 
 sys.path.insert(0, '.')
 
-from crsm.mamba_ssm import MambaModel
-from crsm.latent_dynamics import LatentDynamics
-from crsm.model import CRSM
-from crsm.load_dynamics import load_dynamics_into_crsm, check_dynamics_quality
+from crsm.core.mamba import MambaModel
+from crsm.core.dynamics import LatentDynamics
+from crsm.core import CRSM
+from crsm.training.utils import load_dynamics_into_crsm, check_dynamics_quality
 
 
 @pytest.fixture
@@ -148,7 +148,7 @@ def test_reasoning_with_dynamics():
     # Add dynamics attribute (simulating CRSM structure)
     backbone.dynamics = LatentDynamics(d_model=d_model, num_layers=2).to(device)
     
-    from crsm.reasoning import AsyncDeliberationLoop
+    from crsm.core.reasoning import AsyncDeliberationLoop
     reasoning = AsyncDeliberationLoop(backbone, n_simulations=2)
     
     # Get initial state

@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 import shutil
 import tempfile
-from crsm.dataset import PretokenizedDataset
+from crsm.data.datasets import PretokenizedDataset
 
 class TestPretokenizedDatasetContinuity(unittest.TestCase):
     def setUp(self):

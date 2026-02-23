@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 # Import CRSM components
-from crsm.model import CRSMConfig, CRSMModel, CRSM
-from crsm.mamba_ssm import MambaModel
-from crsm.latent_dynamics import LatentDynamics
+from crsm.core import CRSMConfig, CRSMModel, CRSM
+from crsm.core.mamba import MambaModel
+from crsm.core.dynamics import LatentDynamics
 
 # Ensure we're using a device that works
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

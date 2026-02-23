@@ -9,8 +9,8 @@ For a full training pipeline, see notebooks/colab_train_crsm_2b.ipynb
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset
-from crsm.model import CRSMConfig, CRSMModel
-from crsm.tokenizer import Tokenizer
+from crsm.core import CRSMConfig, CRSMModel
+from crsm.data.tokenizers import Tokenizer
 
 
 class SimpleTextDataset(IterableDataset):

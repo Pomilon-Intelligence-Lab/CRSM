@@ -5,10 +5,11 @@ Basic tests for CRSM model functionality.
 import torch
 import pytest
 import asyncio
-from crsm.model import CRSM
-from crsm.mamba_ssm import MambaModel
-from crsm.train import main as trainer_main
-from crsm.utils import set_seed
+from crsm.core import CRSM, CRSMConfig, CRSMModel
+from crsm.core.mamba import MambaModel
+from crsm.tasks.lm_task import LanguageModelingTask
+from crsm.training.trainer import Trainer
+from crsm.training.utils import set_seed
 
 @pytest.fixture
 def model():
@@ -62,4 +63,10 @@ def test_predict_policy_value():
 def test_trainer_smoke():
     # Run a tiny training epoch to ensure trainer runs
     set_seed(0)
-    trainer_main(epochs=1, batch_size=2, vocab_size=256, seq_len=16, lr=1e-3, seed=0)
+    config = {'batch_size': 2, 'epochs': 1, 'lr': 1e-3}
+    model_config = CRSMConfig(vocab_size=256, hidden_size=64, num_hidden_layers=2)
+    model = CRSMModel(model_config)
+    task = LanguageModelingTask(vocab_size=256, seq_len=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(model, optimizer, config)
+    trainer.fit(task, epochs=1)

@@ -16,9 +16,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, '.')
 
-from crsm.model import CRSM
-from crsm.tokenizer import Tokenizer
-from crsm.utils import set_seed
+from crsm.core import CRSM
+from crsm.data.tokenizers import Tokenizer
+from crsm.training.utils import set_seed
 
 async def evaluate(model, tokenizer, prompts, device, use_mcts):
     results = []

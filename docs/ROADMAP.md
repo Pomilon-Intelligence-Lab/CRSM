@@ -49,17 +49,26 @@ This phase addressed the "Policy Blurring" and "Async Drift" issues, moving the 
 *   **[DONE]** **Targeted Delta Buffer:** Implemented precise state-step alignment to ensure MCTS results are injected exactly at their intended positions.
 *   **[DONE]** **Upgraded Dynamics (Recurrent World Model):** Upgraded the MLP dynamics to a GRUCell for higher simulation fidelity.
 
-## Phase 5: Large-Scale Training & Benchmarking (🚀 NEXT STEPS)
+## Phase 5: Modular Refactor & ARC-AGI Ready (✅ COMPLETE)
 
-With the hierarchical architecture certified, we are ready to train on real data and measure capabilities.
+This phase decoupled the core architecture from task logic, enabling rapid iteration on the ARC-AGI benchmark within tight parameter constraints.
+
+*   **[DONE]** **Domain Decoupling:** Separated the codebase into `core/`, `tasks/`, `training/`, and `data/`.
+*   **[DONE]** **Task Abstraction:** Implemented the `BaseTask` interface and migrated LM and Distillation logic.
+*   **[DONE]** **Generic Training Engine:** Unified procedural training scripts into a robust `Trainer` class.
+*   **[DONE]** **Hierarchical Weight Supervision:** Added Entropy Loss to prevent feature collapse during multi-layer fusion.
+*   **[DONE]** **Targeted Delta Buffer:** Resolved asynchronous application drift for precise state alignment.
+
+## Phase 6: Large-Scale Training & Benchmarking (🚀 NEXT STEPS)
+
+With the hierarchical, modular architecture certified, we are ready to target **ARC-AGI**.
 
 *   **Tasks:**
-    *   **1. Data Curation:**
-        *   **[DONE]** Prepare a high-quality reasoning dataset (e.g., OpenWebText, synthetic reasoning traces).
-        *   **[DONE]** Tokenize and shard data for efficient training.
-    *   **2. Baseline Training (170M - 350M):**
-        *   **[TODO]** Train the 170M parameter baseline using `configs/baseline_170m.yaml`.
-        *   **[TODO]** Train the 350M parameter baseline using `configs/baseline_350m.yaml`.
+    *   **1. ARC-AGI Integration:**
+        *   **[TODO]** Implement `ARCTask` for grid-based spatial reasoning.
+        *   **[TODO]** Develop a grid-to-token encoding strategy optimized for Nano-scale models.
+    *   **2. Nano-Scale Training (100k - 500k):**
+        *   **[TODO]** Benchmark CRSM against standard Mamba/Transformer baselines on ARC tasks.
     *   **3. Advanced Evaluation:**
         *   **[TODO]** Evaluate on standard reasoning benchmarks (GSM8K, ARC).
         *   **[TODO]** Conduct ablation studies on "Injection Rate" and "Deliberation Lag".

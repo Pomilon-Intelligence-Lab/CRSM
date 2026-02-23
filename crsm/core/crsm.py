@@ -13,11 +13,11 @@ import uuid
 import math
 from typing import Optional, Tuple, List, Dict, Union
 from dataclasses import dataclass
-from .logger import logger
+from ..training.logger import logger
 
-from .mamba_ssm import MambaModel
+from .mamba import MambaModel
 from .reasoning import AsyncDeliberationLoop
-from .latent_dynamics import LatentDynamics
+from .dynamics import LatentDynamics
 
 @dataclass
 class CRSMConfig:

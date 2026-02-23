@@ -2,55 +2,56 @@
 
 ## CRSM: Continuous Reasoning State Model
 
-CRSM is a language model architecture that combines Mamba-based efficient sequence modeling with continuous internal reasoning and asynchronous Monte Carlo Tree Search for advanced planning and autonomous operation.
+CRSM is a modular architecture that combines Mamba-based sequence modeling with asynchronous MCTS planning. The project is decoupled into four primary domains to support rapid experimentation on tasks like ARC-AGI.
+
+---
+
+## 🏗️ Modular Structure
+
+### 1. `core/` (Backbone & Planner)
+Pure implementation of the CRSM machinery, free from data-loading or task-specific logic.
+- **`mamba.py`**: The Mamba backbone, including **Multi-Headed Value Critics (MV-Critic)** and **Hierarchical Policy Fusion**.
+- **`reasoning.py`**: The MCTS implementation, featuring **Forward-Projected Planning**.
+- **`dynamics.py`**: The Recurrent World Model (GRU-based Broadcaster).
+- **`crsm.py`**: The top-level wrapper managing the asynchronous interaction between generation and deliberation.
+
+### 2. `tasks/` (Domain Logic)
+Abstracts the "What" from the "How." Each task implements its own loss function and data-loading requirements.
+- **`lm_task.py`**: Causal language modeling with Value Critic supervision and Hierarchical Entropy loss.
+- **`distillation.py`**: Stage 2 Dynamics distillation, training the Broadcaster to predict state residuals.
+- **`arc_task.py`**: (Upcoming) Grid-based reasoning logic for ARC-AGI benchmarking.
+
+### 3. `training/` (The Engine)
+A generic, task-agnostic training engine (`Trainer`) that handles gradient accumulation, mixed precision, and checkpointing.
+
+### 4. `data/` (Providers)
+Handles raw data access, sharding, and tokenization.
+
+---
 
 ## Core Components
 
 ### 1. Token Embedding Layer
-
-- Converts discrete token IDs to dense embeddings
-- Learnable embedding matrix of shape `[vocab_size, hidden_size]`
-- Position embeddings for positional information (rotary or absolute)
+Converts discrete token IDs to dense embeddings. For Nano-scale models, this often accounts for a significant portion of the parameter budget.
 
 ### 2. S4/Mamba Layers
-
-Efficient sequence modeling layers that operate in linear time:
-
-- **State Space Model (S4)**: Compresses history into a state vector
-- **Mamba**: Recent efficient SSM variant with selective state updates
-- Typically stacked in `num_hidden_layers` blocks
+Efficient sequence modeling layers that operate in linear time.
 - **Hierarchical Policy Fusion**: Instead of using only the final layer for the output policy, CRSM uses a **Learned Weighted Sum** of all layer states. This ensures the model integrates both high-level semantic rules and raw spatial/syntactic context.
 
 ### 3. Continuous Reasoning State
-
 The continuous latent state $h(t)$ that:
-- Maintains context across time with linear complexity
-- Is updated via: $h_t = \bar{A}h_{t-1} + \bar{B}x_t$
-- Supports asynchronous MCTS deliberation
-- Enables proactive behavior through internal thresholds
-
-The state matrix $\bar{A}$ is selected dynamically based on planning signals from the deliberation loop.
+- Maintains context across time with linear complexity.
+- Supports asynchronous MCTS deliberation.
+- Is modified via **Sparse-Gated Hierarchical Injection**.
 
 ### 4. Deliberation Loop
-
-Asynchronous MCTS/Tree-of-Thoughts module that:
-- Runs parallel to token generation without blocking latency
+Asynchronous MCTS module that runs parallel to token generation.
 - **Forward-Projected Planning**: Uses the dynamics model to "fast-forward" the latent state to the target position ($S_t \to S_{t+lag}$) before search begins.
-- Explores multiple reasoning paths and future states
-- Performs introspective node expansion for self-correction
-- Generates planning signals that modulate the continuous state
-- Produces soft guidance for output token selection
+- **Targeted Delta Buffer**: Stores planning results and injects them at the **exact** step they were optimized for, resolving asynchronous drift.
 
-### 5. Output Projection
+---
 
-Linear layer projecting from hidden dimension to vocabulary:
-- Input: `[batch, seq_len, hidden_size]`
-- Output: `[batch, seq_len, vocab_size]`
-- Logits are then passed to softmax for next-token prediction
-
-### 6. Sparse-Gated Hierarchical Injection (Stability Mechanism)
-
-**Note:** The primary innovation of CRSM is the **asynchronous interaction loop** between the System 1 backbone and the System 2 planner. The Gated Injection formula below is simply the stabilizing mechanism that makes this loop mathematically viable on a continuous manifold.
+## 📊 Sparse-Gated Hierarchical Injection
 
 To safely integrate the asynchronous thought vectors into the sensitive Mamba manifold, CRSM employs **Sparse-Gated Hierarchical Injection**. Each layer is treated as a sovereign entity with its own independent gate.
 
@@ -60,19 +61,20 @@ $h_{i,new} = (1 - \alpha_{i}) \cdot h_{i,old} + \alpha_{i} \cdot h_{i,target}$
 Where:
 - $h_{i,target}$ is the layer-specific state proposed by the **Multi-Layer Delta Broadcaster**.
 - $\alpha_{i}$ is the effective injection rate for layer $i$, calculated using a Sigmoid gate over the **Multi-Headed Value Critic** output.
-- Confidence is no longer a scalar; it is a vector representing how sure each level of abstraction is about the proposed plan.
 
-This ensures that:
-1.  **Sovereignty:** The planner can refine high-level logic (Strategy) without corrupting low-level syntax (Pixels).
-2.  **Consensus:** The MCTS favors paths where all layers agree on the state's utility.
+This ensures that the planner can refine high-level logic (Strategy) without corrupting low-level syntax (Pixels).
 
-### 7. Targeted Delta Alignment
+---
+
+## 🎯 Targeted Delta Alignment
 
 Planning occurs in parallel with generation. To ensure mathematical validity, a plan optimized for a future token position must be applied **exactly** at that position.
 
 1.  **Buffering**: Planning results are stored in a **Targeted Delta Buffer**, keyed by the target generation step.
 2.  **Application**: During the generation loop, the model checks the buffer. If a delta exists for the current step, it is injected immediately before the next token prediction.
 3.  **Lag Correction**: If a plan arrives too late (generation has already passed the target step), it is decayed exponentially or pruned to prevent "Stale Thought" corruption.
+
+---
 
 ## Configuration
 
@@ -81,22 +83,24 @@ Key hyperparameters in `CRSMConfig`:
 ```python
 @dataclass
 class CRSMConfig:
-    vocab_size: int = 50257           # Vocabulary size
-    hidden_size: int = 2048           # Model hidden dimension (continuous state size)
-    intermediate_size: int = 8192     # FFN intermediate dimension
-    num_hidden_layers: int = 24       # Number of Mamba SSM layers
-    max_position_embeddings: int = 2048  # Max context length
-    d_state: int = 256                # SSM state dimension
-    dropout: float = 0.1              # Dropout rate
-    mcts_depth: int = 8               # Max MCTS tree depth
-    mcts_simulations: int = 32        # Simulations per deliberation step
-    injection_rate: float = 0.05      # Gated injection rate (alpha) for state updates
-    autonomy_threshold: float = 0.7   # Internal signal strength for autonomous action
+    vocab_size: int = 1024            # Optimized for Nano-scale
+    hidden_size: int = 256            # Model hidden dimension
+    intermediate_size: int = 1024     # FFN intermediate dimension
+    num_hidden_layers: int = 4        # Hierarchy depth
+    d_state: int = 64                 # SSM state dimension
+    injection_rate: float = 0.05      # Max injection alpha
 ```
+
+---
 
 ## Training Strategy
 
-### Two-Phase Training
+CRSM uses a multi-stage pipeline orchestrated by the unified `run.py` entry point.
+
+1. **Backbone Pretraining**: Standard CLM training using `LanguageModelingTask`.
+2. **Dynamics Distillation**: Training the Broadcaster using `DistillationTask`.
+3. **Value Head Fine-tuning**: Offline reinforcement learning to train the MV-Critics.
+4. **Task-Specific Alignment**: Fine-tuning on ARC-AGI or other reasoning benchmarks.
 
 1. **Base Model Pretraining**
    - Objective: Causal language modeling (predict next token)

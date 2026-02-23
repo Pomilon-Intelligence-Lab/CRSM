@@ -19,9 +19,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, '.')
 
-from crsm.model import CRSM
-from crsm.tokenizer import Tokenizer
-from crsm.utils import set_seed
+from crsm.core import CRSM
+from crsm.data.tokenizers import Tokenizer
+from crsm.training.utils import set_seed
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -34,8 +34,8 @@ class OfflineValueTrainer:
         self.model = model
         self.config = config
         self.device = device
-        # Only train the value head
-        self.optimizer = optim.Adam(model.backbone.value_head.parameters(), lr=float(config['training']['value_training']['lr']))
+        # Train all Multi-Headed Value Critics
+        self.optimizer = optim.Adam(model.backbone.value_heads.parameters(), lr=float(config['training']['value_training']['lr']))
         
     async def simulate_rollout(self, prompt_ids, max_length=20):
         """
@@ -180,11 +180,12 @@ async def main_async():
     # Load Dynamics
     model.load_dynamics(dynamics_path)
     
-    # Freeze everything except Value Head
-    for param in model.parameters():
+    # Freeze backbone, only train value head
+    for param in model.backbone.parameters():
         param.requires_grad = False
-    for param in model.backbone.value_head.parameters():
-        param.requires_grad = True
+    for v_head in model.backbone.value_heads:
+        for param in v_head.parameters():
+            param.requires_grad = True
         
     # Data Generation (Offline Rollouts)
     print("Generating Offline Data via MCTS Simulation...")

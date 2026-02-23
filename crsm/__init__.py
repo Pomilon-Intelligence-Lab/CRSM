@@ -1,1 +1,1 @@
-from .model import CRSM
+from .core import CRSM, CRSMModel, CRSMConfig

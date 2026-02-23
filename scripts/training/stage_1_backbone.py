@@ -59,66 +59,13 @@ def main():
     print("STAGE 1: Backbone Training (System 1)")
     print("="*60)
     
-    # Construct Command
-    # Start with config values, override if CLI arg is present
-    epochs = args.epochs if args.epochs is not None else config['training']['backbone_epochs']
-    batch_size = args.batch_size if args.batch_size is not None else config['training']['batch_size']
-    seq_len = args.seq_len if args.seq_len is not None else config['training']['seq_len']
-    lr = args.lr if args.lr is not None else config['training']['lr']
-    grad_accum = args.grad_accum if args.grad_accum is not None else config['training'].get('grad_accum', 1)
+    # Build Command for new modular run.py
+    cmd = [sys.executable, 'run.py', '--config', args.config, '--task', 'lm']
     
-    cmd = [
-        sys.executable, '-m', 'crsm.cli', 'train',
-        '--epochs', str(epochs),
-        '--batch-size', str(batch_size),
-        '--vocab-size', str(config['model']['vocab_size']),
-        '--seq-len', str(seq_len),
-        '--lr', str(lr),
-        '--checkpoint-dir', str(output_dir),
-        '--no-value-loss',
-        '--d-model', str(config['model']['d_model']),
-        '--d-state', str(config['model']['d_state']),
-        '--d-ffn', str(config['model']['d_ffn']),
-        '--num-layers', str(config['model']['num_layers']),
-        '--grad-accum', str(grad_accum),
-        '--num-workers', str(args.num_workers)
-    ]
-    
-    # Optional Args
-    data_dir = args.data_dir if args.data_dir else config['data'].get('data_dir')
-    if data_dir:
-        cmd.extend(['--data-dir', data_dir])
-    
-    if config['training'].get('use_amp', False):
-        cmd.append('--amp')
-        
-    system_config = config.get('system', {})
-    
-    if args.device:
-        cmd.extend(['--device', args.device])
-    elif system_config.get('device'):
-        cmd.extend(['--device', system_config['device']])
-
+    # Forward relevant arguments if provided
+    # Note: run.py expects YAML for most things, but we can pass seed
     if args.seed is not None:
         cmd.extend(['--seed', str(args.seed)])
-    elif system_config.get('seed'):
-        cmd.extend(['--seed', str(system_config['seed'])])
-
-    if args.no_wandb:
-        cmd.append('--no-wandb')
-    elif args.wandb_project:
-        cmd.extend(['--wandb-project', args.wandb_project])
-    
-    if args.tokenizer:
-        cmd.extend(['--tokenizer', args.tokenizer])
-    elif config.get('tokenizer'):
-        cmd.extend(['--tokenizer', config['tokenizer']])
-        
-    if args.resume:
-        cmd.extend(['--resume', args.resume])
-        
-    if args.distributed:
-        cmd.append('--distributed')
 
     print(f"Executing: {' '.join(cmd)}")
     

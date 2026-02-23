@@ -1,7 +1,7 @@
 import torch
 import asyncio
-from crsm.model import CRSM, CRSMConfig
-from crsm.reasoning import AsyncDeliberationLoop
+from crsm.core import CRSM, CRSMConfig
+from crsm.core.reasoning import AsyncDeliberationLoop
 
 async def test_forward_projection():
     print("Initializing CRSM for Forward Projection Verification...")

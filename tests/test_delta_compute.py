@@ -2,8 +2,8 @@ import torch
 import pytest
 
 # Assuming the 'crsm' package is in the root or installed
-from crsm.mamba_ssm import MambaModel
-from crsm.reasoning import AsyncDeliberationLoop
+from crsm.core.mamba import MambaModel
+from crsm.core.reasoning import AsyncDeliberationLoop
 
 # --- Pytest Fixture ---
 

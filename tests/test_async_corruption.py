@@ -3,7 +3,7 @@ import asyncio
 import pytest
 import torch
 import time
-from crsm.model import CRSM, CRSMConfig
+from crsm.core import CRSM, CRSMConfig
 
 class MockBackbone(torch.nn.Module):
     def __init__(self):
