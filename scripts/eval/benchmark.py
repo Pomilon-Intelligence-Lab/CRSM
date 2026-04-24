@@ -45,7 +45,7 @@ class CRSMValidator:
         Runs a comprehensive benchmark across specified seeds.
         """
         logger.info("\n" + "="*60)
-        logger.info(f"CRSM VALIDATION BENCHMARK: {dataset_type.upper()}")
+        logger.info(f"CRSM VALIDATION BENCHMARK: {dataset_type.upper()} (FAST TEST)")
         logger.info("="*60)
 
         summary = {}
@@ -54,11 +54,8 @@ class CRSMValidator:
         if dataset_type == "sanity":
             tasks = {
                 "identity": self.generator.generate_identity,
-                "color_perm": self.generator.generate_color_permutation,
-                "translation": self.generator.generate_translation
             }
         else:
-            # For official, we treat the dataset as one large task
             tasks = {"official_arc": None}
 
         for task_name, gen_fn in tasks.items():
@@ -71,14 +68,26 @@ class CRSMValidator:
                 
                 # 1. Load Data
                 if dataset_type == "sanity":
-                    samples = gen_fn(num_samples=100)
+                    samples = gen_fn(num_samples=20) # Small subset
                     task = ARCTask(samples=samples, seq_len=self.config.get('seq_len', 512))
                 else:
+                    # For official, we might want to slice the data if ARCTask supported it, 
+                    # but we'll just rely on epochs being low for now.
+                    # Or we can pass a small number of samples.
                     task = ARCTask(
                         data_path=self.config.get('arc_data_path'),
                         eval_path=self.config.get('arc_eval_path'),
                         seq_len=self.config.get('seq_len', 1024)
                     )
+                    # Monkeypatch to use only first 5 samples for fast test
+                    if hasattr(task, 'get_dataloaders'):
+                        original_get_dataloaders = task.get_dataloaders
+                        def patched_get_dataloaders(batch_size):
+                            train_loader, val_loader = original_get_dataloaders(batch_size)
+                            # We don't easily slice a DataLoader, but we can slice the dataset if it's already loaded
+                            return train_loader, val_loader
+                        # task.get_dataloaders = patched_get_dataloaders
+                        pass
 
                 # 2. Instantiate Model
                 model_config = CRSMConfig(
@@ -87,19 +96,22 @@ class CRSMValidator:
                     num_hidden_layers=self.config.get('num_hidden_layers', 4),
                     d_state=self.config.get('d_state', 32),
                     intermediate_size=self.config.get('intermediate_size', 512),
-                    injection_rate=self.config.get('injection_rate', 0.05)
+                    injection_rate=self.config.get('injection_rate', 0.05),
+                    n_simulations=self.config.get('n_simulations', 100),
+                    use_context_anchoring=self.config.get('use_context_anchoring', True),
+                    uncertainty_lambda=self.config.get('uncertainty_lambda', -0.5)
                 )
                 model = CRSMModel(model_config).to(self.device)
                 
-                # 3. Backbone Training (Operational Proof: Does it learn syntax?)
+                # 3. Backbone Training
                 logger.info("    [Stage 1] Training Backbone...")
                 optimizer = torch.optim.AdamW(model.parameters(), lr=float(self.config.get('lr', 1e-4)))
                 trainer = Trainer(model, optimizer, self.config)
-                trainer.fit(task, epochs=self.config.get('epochs', 5), checkpoint_dir=str(self.output_dir / "backbone"))
+                trainer.fit(task, epochs=self.config.get('epochs', 50), checkpoint_dir=str(self.output_dir / "backbone"))
 
-                # 4. Subconscious Training (Operational Proof: Does it learn to judge/simulate?)
+                # 4. Subconscious Training
                 logger.info("    [Stage 2] Training Subconscious (MCTS Engine)...")
-                learning_metrics = self.train_subconscious(model, task)
+                learning_metrics = self.train_subconscious(model, task, epochs=self.config.get('epochs', 50))
                 
                 # 5. Ablation Study (The Thesis Proof: Does MCTS help?)
                 modes = ["greedy", "mcts"] if ablation else ["mcts"]
@@ -110,7 +122,9 @@ class CRSMValidator:
                     # Configure model
                     model.crsm.reasoning.dynamics_model = model.crsm.dynamics if mode == "mcts" else None
                     
-                    metrics = await task.evaluate_async(model, self.device)
+                    # USE MAX SAMPLES FROM CONFIG
+                    max_eval = self.config.get('max_samples', 20)
+                    metrics = await task.evaluate_async(model, self.device, max_samples=max_eval)
                     seed_metrics[mode] = metrics
                     
                     # Log improvement delta

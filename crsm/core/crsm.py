@@ -40,6 +40,9 @@ class CRSMConfig:
     max_lag: int = 10  # NEW: Maximum lag to accept deltas
     delta_scale: float = 0.1  # Deprecated in favor of injection_rate, kept for compat
     injection_rate: float = 0.05  # NEW: Gated injection rate (alpha)
+    uncertainty_lambda: float = 0.1 # NEW: Penalty/Bonus for layer variance
+    use_surprise_reward: bool = False # NEW: Surprise Reward
+    use_context_anchoring: bool = False # NEW: ARC Contextual Truth Anchoring
 
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'CRSMConfig':
@@ -65,6 +68,9 @@ class CRSMConfig:
             'max_lag': self.max_lag,
             'delta_scale': self.delta_scale,
             'injection_rate': self.injection_rate,
+            'uncertainty_lambda': self.uncertainty_lambda,
+            'use_surprise_reward': self.use_surprise_reward,
+            'use_context_anchoring': self.use_context_anchoring,
         }
 
 class CRSMModel(nn.Module):
@@ -89,6 +95,8 @@ class CRSMModel(nn.Module):
             max_lag=config.max_lag,
             delta_scale=getattr(config, 'delta_scale', 0.1),
             injection_rate=getattr(config, 'injection_rate', 0.05),
+            uncertainty_lambda=getattr(config, 'uncertainty_lambda', 0.1),
+            use_surprise_reward=getattr(config, 'use_surprise_reward', False),
         )
 
     def load_dynamics(self, dynamics_path: str):
@@ -134,7 +142,9 @@ class CRSM(nn.Module):
                  delta_decay: float = 0.9,
                  max_lag: int = 10,
                  delta_scale: float = 0.1,
-                 injection_rate: float = 0.05):
+                 injection_rate: float = 0.05,
+                 uncertainty_lambda: float = 0.1,
+                 use_surprise_reward: bool = False):
         """
         Args:
             vocab_size: Size of the vocabulary
@@ -153,6 +163,8 @@ class CRSM(nn.Module):
             max_lag: Maximum lag to accept deltas
             delta_scale: Scaling factor (Deprecated)
             injection_rate: Gated injection rate (alpha)
+            uncertainty_lambda: Penalty/Bonus factor for layer variance
+            use_surprise_reward: Boost low-prior high-value nodes
         """
         super().__init__()
         
@@ -173,7 +185,9 @@ class CRSM(nn.Module):
         self.reasoning = AsyncDeliberationLoop(
             mamba_model=self.backbone,
             c_puct=c_puct,
-            n_simulations=n_simulations
+            n_simulations=n_simulations,
+            uncertainty_lambda=uncertainty_lambda,
+            use_surprise_reward=use_surprise_reward
         )
         
         # Connect dynamics to reasoning
@@ -396,7 +410,7 @@ class CRSM(nn.Module):
                     state_to_plan = state_copy
 
                 # Run MCTS (this is the slow part, but it's in background)
-                logger.debug(f"  [Deliberation] Planning for position {position}...")
+                logger.debug(f"  [Worker] Planning for pos {position}...")
                 
                 # Run on GPU but in separate async context
                 action, delta, confidence = await asyncio.to_thread(
@@ -404,6 +418,8 @@ class CRSM(nn.Module):
                     sequence,
                     state_to_plan
                 )
+                
+                logger.debug(f"  [Worker] Done pos {position} -> {action}")
                 
                 # Store result
                 self._deliberation_results[position] = (action, confidence)
@@ -438,6 +454,23 @@ class CRSM(nn.Module):
         except asyncio.QueueFull:
             # Queue full, skip this request
             pass
+
+    async def _get_suggestion_async(self, position, timeout=0):
+        """Get deliberation result if ready, optionally blocking."""
+        if timeout <= 0:
+            if position in self._deliberation_results:
+                return self._deliberation_results.pop(position)
+            return None
+            
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            if position in self._deliberation_results:
+                return self._deliberation_results.pop(position)
+            
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                return None
+                
+            await asyncio.sleep(0.01)
 
     def _get_suggestion(self, position, timeout=0):
         """Get deliberation result if ready (non-blocking)."""
@@ -554,18 +587,27 @@ class CRSM(nn.Module):
         self._targeted_deltas.clear()
         logger.info("✓ Flushed async queues and targeted buffer")
 
-    async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True):
+    async def think_and_generate(self, prompt, max_length=100, use_deliberation=True, deliberation_lag=3, fallback_to_sampling=True, use_context_anchoring=None):
         """
         Generate tokens with asynchronous deliberation.
-        
-        Args:
-            use_deliberation: Enable background MCTS
-            deliberation_lag: Tokens ahead to deliberate (0=synchronous, 3=async)
-            fallback_to_sampling: If True, use sampling when deliberation isn't ready
-                                  If False, wait for deliberation (slower but more thoughtful)
         """
         self._ensure_async_components()
         
+        # Determine anchoring
+        if use_context_anchoring is None:
+            use_context_anchoring = getattr(self.config if hasattr(self, 'config') else self, 'use_context_anchoring', False)
+            
+        if use_context_anchoring:
+            from .reasoning import ARCContextEvaluator
+            # prompt is (1, seq) tensor, convert to list
+            prompt_list = prompt[0].tolist()
+            evaluator = ARCContextEvaluator(prompt_list)
+            self.reasoning.path_evaluator = evaluator
+            logger.info("✓ Contextual Truth Anchoring enabled for ARC task")
+        else:
+            # Clear evaluator if not used
+            self.reasoning.path_evaluator = None
+
         # Start background deliberation task
         if use_deliberation:
             self._start_background_deliberation()
@@ -598,27 +640,32 @@ class CRSM(nn.Module):
             # FAST PATH: Generate token immediately
             # ============================================
             with torch.no_grad():
-                logits, states = self.backbone(current_sequence, states)
+                # INCREMENTAL: Only pass the new token if we already have state
+                if step == 0:
+                    logits, states = self.backbone(current_sequence, states)
+                else:
+                    logits, states = self.backbone(current_sequence[:, -1:], states)
             
-            # Check if deliberation has a suggestion (non-blocking)
+            # Check if deliberation has a suggestion (non-blocking or blocking depending on fallback)
             if use_deliberation:
                 if fallback_to_sampling:
                     # Non-blocking: use suggestion if ready, else sample
-                    suggestion = self._get_suggestion(step, timeout=0)
+                    suggestion = await self._get_suggestion_async(step, timeout=0)
                 else:
-                    # Blocking: wait for deliberation (original behavior)
-                    suggestion = self._get_suggestion(step, timeout=1.0)  # Wait up to 1s
+                    # Blocking: wait for deliberation 
+                    suggestion = await self._get_suggestion_async(step, timeout=60.0) 
             else:
                 suggestion = None
             
             if suggestion is not None:
                 # Use deliberated action
                 next_token, confidence = suggestion
-                logger.debug(f"  [MCTS] Using deliberated token {next_token} (conf: {confidence:.2f})")
+                conf_str = f"{confidence[0]:.2f}" if isinstance(confidence, list) else f"{confidence:.2f}"
+                logger.debug(f"  [MCTS] Step {step} Suggestion: {next_token} (conf: {conf_str})")
             else:
                 # Fallback to sampling (instant)
                 next_token = self.sample_next_token(logits[0, -1])
-                logger.debug(f"  [Sample] Using sampled token {next_token}")
+                logger.debug(f"  [Sample] Step {step} Choice: {next_token}")
             
             # Update sequence
             token_tensor = torch.tensor([[next_token]], device=prompt.device)
@@ -632,7 +679,9 @@ class CRSM(nn.Module):
                 self.latent_state = [s.clone() if s is not None else None for s in states]
             
             # Check for state updates from deliberation
-            await self._apply_pending_deltas(current_step=step)
+            updated_states = await self._apply_pending_deltas(current_step=step)
+            if updated_states is not None:
+                states = updated_states
             
             # Precise Alignment: Apply buffered delta if it matches THIS step
             if step in self._targeted_deltas:

@@ -1,5 +1,8 @@
 # CRSM: Continuous Reasoning State Model
 
+> ⚠️ **NOTICE: PLANNED RE-IMPLEMENTATION**
+> This project is currently undergoing a planned rewrite to improve maintainability and debugging. The objective is to implement an architecture that allows for clear, step-by-step tracing of the entire process—from input and MCTS reasoning to state injection and final output—while resolving hidden synchronization and state-drift bugs.
+
 > ⚠️ **STATUS: EXPERIMENTAL PROTOTYPE**
 > This is a research experiment exploring whether a continuous background planner can guide a language model without pausing generation. While the core "Gated State Injection" mathematics have been verified for stability, the model is currently a proof-of-concept.
 

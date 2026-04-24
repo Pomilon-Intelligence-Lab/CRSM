@@ -1,22 +1,25 @@
 # True Nano Configuration for ARC-AGI
 # Target: ~88k parameters for maximum MCTS simulation throughput
 vocab_size: 100
-hidden_size: 64
-num_hidden_layers: 2
-intermediate_size: 128
-d_state: 16
-injection_rate: 0.2  # Increased to ensure MCTS signal overrides greedy bias
+hidden_size: 128
+num_hidden_layers: 4
+intermediate_size: 256
+d_state: 32
 
 # Reasoning
-n_simulations: 1000  # High-fidelity search
-c_puct: 1.5          
+n_simulations: 400  
+c_puct: 2.0          
+use_context_anchoring: true
+uncertainty_lambda: -0.5
+injection_rate: 0.4  
 
 # Training
 lr: 5e-4
-epochs: 20
+epochs: 100
 batch_size: 16
 seq_len: 1024
 
 # Task Data
-arc_data_path: "data/arc_official/training"
-arc_eval_path: "data/arc_official/evaluation"
+max_samples: 100
+arc_data_path: "/home/pomilon/Research/CRSM-Model/CRSM/data/arc_official/data/training"
+arc_eval_path: "/home/pomilon/Research/CRSM-Model/CRSM/data/arc_official/data/evaluation"

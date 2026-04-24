@@ -12,6 +12,195 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 import numpy as np
 
+def parse_arc_grids(tokens: List[int]) -> List[List[List[int]]]:
+    """Extracts all complete grids from a sequence of tokens."""
+    grids = []
+    i = 0
+    while i < len(tokens):
+        # ARC Tokens: 13=ROW_END, 14=GRID_END, 16-45=Rows, 46-75=Cols
+        if 16 <= tokens[i] <= 45: # Row header
+            rows = tokens[i] - 15
+            if i + 1 < len(tokens) and 46 <= tokens[i+1] <= 75: # Col header
+                cols = tokens[i+1] - 45
+                grid = []
+                curr_row = []
+                idx = i + 2
+                while idx < len(tokens) and len(grid) < rows:
+                    t = tokens[idx]
+                    if 0 <= t <= 9:
+                        curr_row.append(t)
+                    elif t == 13: # ROW_END
+                        if len(curr_row) < cols:
+                            curr_row.extend([0] * (cols - len(curr_row)))
+                        grid.append(curr_row[:cols])
+                        curr_row = []
+                    elif t == 14: # GRID_END
+                        break
+                    idx += 1
+                if len(grid) > 0:
+                    grids.append(grid)
+                i = idx
+            else:
+                i += 1
+        else:
+            i += 1
+    return grids
+
+class TokenLevelStructuralEvaluator:
+    """
+    Strictly validates the ARC token protocol during MCTS generation.
+    Forces the model to respect:
+    1. Dimension tokens (16-45 for rows, 46-75 for cols)
+    2. [ROW_END] (13) at correct intervals
+    3. [GRID_END] (14) after correct row count
+    """
+    def __call__(self, path: List[int]) -> float:
+        if not path: return 0.5
+        
+        # We only care about the sequence starting from dimension headers
+        # Search for first dimension token (16-75)
+        start_idx = -1
+        for i, t in enumerate(path):
+            if 16 <= t <= 75:
+                start_idx = i
+                break
+        
+        if start_idx == -1: return 0.5 # Too early to judge
+        
+        relevant = path[start_idx:]
+        if len(relevant) < 2: return 0.6 # Good start
+        
+        rows = relevant[0] - 15
+        cols = relevant[1] - 45
+        
+        if not (1 <= rows <= 30 and 1 <= cols <= 30):
+            return 0.1 # Invalid dimensions
+            
+        # Validate grid content
+        grid_content = relevant[2:]
+        if not grid_content: return 0.7
+        
+        curr_row_len = 0
+        row_count = 0
+        
+        for i, t in enumerate(grid_content):
+            if t == 13: # [ROW_END]
+                if curr_row_len != cols:
+                    return 0.0 # WRONG COLUMN COUNT
+                curr_row_len = 0
+                row_count += 1
+                # CRITICAL: If we already have enough rows, the NEXT token MUST be 14 or we fail
+                continue 
+            elif t == 14: # [GRID_END]
+                if row_count != rows:
+                    return 0.0 # WRONG ROW COUNT
+                return 1.0 # Perfect termination!
+            
+            # If we are past the row count and still seeing tokens that aren't 14
+            if row_count == rows and t != 14:
+                return 0.0 # Kill path that won't end
+            elif 0 <= t <= 9: # Color
+                curr_row_len += 1
+                if curr_row_len > cols:
+                    return 0.0 # Row too long
+            else:
+                # Unexpected token in grid (like high index noise)
+                # Penalize but don't KILL (allow some search noise)
+                return 0.1 
+                
+        # CRITICAL FIX: If we just finished a row's colors, the NEXT token MUST be 13.
+        # This is where the model fails (predicts 0 instead of 13).
+        if curr_row_len == cols and len(grid_content) > 0 and grid_content[-1] != 13:
+             # We just added the last color, the next MCTS step MUST find 13.
+             # If we are AT the limit, we give a high structural score,
+             # but the NEXT token evaluation will fail if it's not 13.
+             return 0.9 
+        
+        # If we reached column limit but the LAST token isn't 13, and we have MORE tokens, it's an error
+        # (This is handled by the loop above if t is a color)
+
+        return 0.8 # So far so good
+
+class ARCContextEvaluator:
+    """
+    Analyzes ARC prompt context to provide objective rewards for MCTS paths.
+    Anchors search to the logic implied by training examples.
+    """
+    def __init__(self, prompt_tokens: List[int]):
+        self.prompt_grids = parse_arc_grids(prompt_tokens)
+        # Typically: [I1, O1, I2, O2, ..., Itest]
+        # We assume pairs except the last one which is the test input
+        self.train_pairs = []
+        if len(self.prompt_grids) >= 2:
+            for i in range(0, len(self.prompt_grids) - 1, 2):
+                if i + 1 < len(self.prompt_grids):
+                    self.train_pairs.append((self.prompt_grids[i], self.prompt_grids[i+1]))
+        
+        self.test_input = self.prompt_grids[-1] if self.prompt_grids else None
+        
+        # Analyze dimensions
+        self.dim_changes = []
+        for inp, out in self.train_pairs:
+            self.dim_changes.append((len(inp), len(inp[0]), len(out), len(out[0])))
+            
+        # Analyze if it's an 'Identity' task (The common bias)
+        self.is_identity = all(inp == out for inp, out in self.train_pairs) if self.train_pairs else False
+        
+    def __call__(self, path: List[int]) -> float:
+        """
+        Combined evaluator: Structural protocol + Logical consistency.
+        Returns 0.0 for invalid structure, otherwise logical score [0, 1].
+        """
+        # 0. Structural Protocol Check (High Priority)
+        struct_eval = TokenLevelStructuralEvaluator()
+        struct_score = struct_eval(path)
+        if struct_score == 0.0:
+            return 0.0 # Strict failure
+            
+        # Parse the grid being generated in imagination
+        imagined_grids = parse_arc_grids(path)
+        if not imagined_grids:
+            return struct_score * 0.5 # Partial reward for correct structure
+            
+        cand_out = imagined_grids[0]
+        r_cand, c_cand = len(cand_out), len(cand_out[0])
+        
+        reward = 0.5 # Neutral start
+        
+        # 1. Structural Verification: Dimension Check
+        # If all train examples transform dimensions in a specific way, cand_out should too.
+        if self.dim_changes and self.test_input:
+            r_in, c_in = len(self.test_input), len(self.test_input[0])
+            # Check for constant dimension ratio or fixed size
+            all_fixed_size = all(d[2] == r_cand and d[3] == c_cand for d in self.dim_changes)
+            all_fixed_ratio = all(d[2]/d[0] == r_cand/r_in and d[3]/d[1] == c_cand/c_in for d in self.dim_changes)
+            
+            if not (all_fixed_size or all_fixed_ratio):
+                reward -= 0.2 # Penalty for structural inconsistency
+            else:
+                reward += 0.1
+                
+        # 2. Logical Discovery: Break Identity Bias
+        # If we KNOW it's not identity, but the model produces identity, penalize heavily.
+        if not self.is_identity and self.test_input and cand_out == self.test_input:
+            reward -= 0.4 # Strong anti-bias anchor
+            
+        # 3. Color Palette Consistency
+        if self.train_pairs:
+            train_out_colors = set()
+            for _, out in self.train_pairs:
+                for row in out: train_out_colors.update(row)
+            
+            cand_colors = set()
+            for row in cand_out: cand_colors.update(row)
+            
+            # If candidate uses colors NEVER seen in any output, be suspicious
+            unseen_colors = cand_colors - train_out_colors
+            if unseen_colors:
+                reward -= 0.1 * len(unseen_colors)
+                
+        return max(0.0, min(1.0, reward))
+
 @dataclass
 class MCTSNode:
     prior_p: float
@@ -22,43 +211,60 @@ class MCTSNode:
     visit_count: int = 0
     value_sum: float = 0.0
     layer_value_sums: Optional[List[float]] = None # Sum of values per layer
+    uncertainty_lambda: float = 0.1 # Default penalty
+    use_surprise_reward: bool = False
+    external_reward: Optional[float] = None # NEW: CTA Reward [0, 1]
     
     @property
     def value(self) -> float:
         if self.visit_count == 0:
             return 0.0
         
-        # If we have layer values, implement Weighted Consensus with Uncertainty Penalty
+        # If external evaluator (CTA) flagged this as impossible/invalid
+        if self.external_reward is not None and self.external_reward == 0.0:
+            return -1.0 # Kill this path
+        
+        # Base value from average (or consensus)
         if self.layer_value_sums:
             layer_means = [s / self.visit_count for s in self.layer_value_sums]
-            
-            # Compute mean and standard deviation across layers
-            # High variance across layers indicates the model's abstraction levels disagree
-            # which we treat as "unstable" or "uncertain".
             v_tensor = torch.tensor(layer_means)
             mean_v = v_tensor.mean().item()
-            # If only one layer, std is 0
             std_v = v_tensor.std().item() if v_tensor.numel() > 1 else 0.0
+            val = mean_v - self.uncertainty_lambda * std_v
+        else:
+            val = self.value_sum / self.visit_count
+
+        # Combine with external reward if present
+        if self.external_reward is not None:
+            # External reward acts as a strong multiplier or bias
+            val = 0.5 * val + 0.5 * (self.external_reward * 2.0 - 1.0)
+
+        # Hypothesis S: Surprise Reward
+        if self.use_surprise_reward and self.prior_p > 0:
+            surprise = -math.log(self.prior_p + 1e-8)
+            val = val * (1.0 + 0.1 * surprise)
             
-            # Consensus = Mean Value - Lambda * Uncertainty
-            return mean_v - 0.1 * std_v
-            
-        return self.value_sum / self.visit_count
+        return val
     
     def expanded(self) -> bool:
         return len(self.children) > 0
 
 class AsyncDeliberationLoop:
-    def __init__(self, mamba_model, c_puct=1.0, n_simulations=50):
+    def __init__(self, mamba_model, c_puct=1.0, n_simulations=50, uncertainty_lambda=0.1, use_surprise_reward=False):
         """
         Args:
             mamba_model: The underlying Mamba model for state processing
             c_puct: Exploration constant for PUCT algorithm
             n_simulations: Number of MCTS simulations per deliberation
+            uncertainty_lambda: Penalty/Bonus factor for layer variance
+            use_surprise_reward: Boost low-prior high-value nodes
         """
         self.model = mamba_model
         self.c_puct = c_puct
         self.n_simulations = n_simulations
+        self.uncertainty_lambda = uncertainty_lambda
+        self.use_surprise_reward = use_surprise_reward
+        self.path_evaluator = None # Optional function: (path) -> float reward
         self.top_k = 16  # Top actions to expand per node
         self.rollout_depth = 5  # Rollout depth for value estimation
         
@@ -95,7 +301,7 @@ class AsyncDeliberationLoop:
         return state
 
     def select_action(self, node: MCTSNode) -> Tuple[MCTSNode, List[int]]:
-        """Select the most promising action using PUCT algorithm"""
+        """Select the most promising action using Adaptive PUCT algorithm"""
         path = []
         
         while node.expanded():
@@ -103,13 +309,26 @@ class AsyncDeliberationLoop:
             best_action = -1
             best_child = None
             
+            # Adaptive PUCT: Increase exploration if the node is over-confident
+            # We use the entropy of the priors as a proxy for confidence.
+            priors = torch.tensor([child.prior_p for child in node.children.values()])
+            entropy = -torch.sum(priors * torch.log(priors + 1e-8)).item()
+            # Max entropy for top_k=16 is log(16) approx 2.77
+            # If entropy is low (e.g. < 1.0), we are in a high-confidence regime.
+            # We boost C_puct to force exploration.
+            adaptive_c = self.c_puct
+            if entropy < 1.0:
+                # Boost C up to 2x as entropy approaches 0
+                adaptive_c *= (1.0 + (1.0 - entropy))
+
             for action, child in node.children.items():
                 if child.visit_count > 0:
                     q_value = child.value
-                    u_value = (self.c_puct * child.prior_p * 
+                    u_value = (adaptive_c * child.prior_p * 
                              math.sqrt(node.visit_count) / (1 + child.visit_count))
                     ucb = q_value + u_value
                 else:
+                    # Unvisited nodes get a boost from the adaptive C too
                     ucb = float('inf')
                     
                 if ucb > max_ucb:
@@ -121,6 +340,71 @@ class AsyncDeliberationLoop:
             node = best_child
             
         return node, path
+
+    def _apply_structural_prior(self, logits: torch.Tensor, path: List[int]) -> torch.Tensor:
+        """
+        Adjusts backbone logits based on the ARC protocol.
+        """
+        if self.path_evaluator is None or not isinstance(self.path_evaluator, ARCContextEvaluator):
+            return logits
+            
+        # Find where the CURRENT output grid starts (after the last 12)
+        output_start_idx = -1
+        for i in range(len(path)-1, -1, -1):
+            if path[i] == 12: # [OUTPUT_START]
+                output_start_idx = i
+                break
+                
+        if output_start_idx == -1:
+            return logits
+            
+        current_output_path = path[output_start_idx + 1:]
+        # print(f"  [Prior] Path: {current_output_path}")
+        
+        # Scenario A: Need to emit Rows
+        if len(current_output_path) == 0:
+            if self.path_evaluator.dim_changes:
+                expected_rows = self.path_evaluator.dim_changes[0][2] + 15
+                logits = logits.clone()
+                logits[0, :] = -100.0
+                logits[0, expected_rows] = 20.0
+                logger.debug(f"  [Prior] Scenario A -> Force {expected_rows}")
+            return logits
+            
+        # Scenario B: Need to emit Cols
+        if len(current_output_path) == 1:
+            if self.path_evaluator.dim_changes:
+                expected_cols = self.path_evaluator.dim_changes[0][3] + 45
+                logits = logits.clone()
+                logits[0, :] = -100.0
+                logits[0, expected_cols] = 20.0
+                logger.debug(f"  [Prior] Scenario B -> Force {expected_cols}")
+            return logits
+            
+        # Scenario C: In the grid, boost colors and structural tokens
+        valid_colors = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14}
+        mask = torch.full_like(logits, -20.0) 
+        for c in valid_colors:
+            mask[0, c] = 0.0
+            
+        # Scenario D: FORCE termination if row_count is reached
+        grid_content = current_output_path[2:]
+        row_count = 0
+        for t in grid_content:
+            if t == 13: row_count += 1
+            
+        expected_rows = self.path_evaluator.dim_changes[0][2]
+        logits = logits.clone()
+        
+        if row_count == expected_rows:
+            # We finished the rows, GRID_END is REQUIRED
+            logits[0, :] = -100.0
+            logits[0, 14] = 20.0
+        elif row_count < expected_rows:
+            # Prevent GRID_END until rows are done
+            logits[0, 14] = -100.0
+        
+        return logits + mask
 
     def project_future_state(self, state: List[torch.Tensor], k_steps: int) -> List[torch.Tensor]:
         """
@@ -142,22 +426,30 @@ class AsyncDeliberationLoop:
                 
         return curr_state
     
-    def expand_node(self, node: MCTSNode, logits: torch.Tensor, value: float):
-        """Expand a leaf node using model predictions"""
-        probs = torch.softmax(logits, dim=-1)
-        topk = min(self.top_k, logits.size(-1))
+    def expand_node(self, node: MCTSNode, logits: torch.Tensor, value: float, path: List[int]):
+        """Expand a leaf node using model predictions with Structural Prior Injection"""
+        
+        # Get the full sequence by prepending the current base sequence
+        full_path = (self._current_seq_list if hasattr(self, '_current_seq_list') else []) + path
+        
+        # Injection: Bias the priors towards correct ARC structure
+        biased_logits = self._apply_structural_prior(logits.unsqueeze(0), full_path).squeeze(0)
+        
+        probs = torch.softmax(biased_logits, dim=-1)
+        topk = min(self.top_k, biased_logits.size(-1))
         topv, topi = torch.topk(probs, topk)
         for p, a in zip(topv.tolist(), topi.tolist()):
             if p <= 0:
                 continue
-            # Memory Wall Fix: Do NOT compute or store next_state here.
-            # Just store the action. State is reconstructed on demand.
+            
             child = MCTSNode(
                 prior_p=float(p),
                 children={},
                 parent=node,
                 action=int(a),
-                state_cache=None # Lazy
+                state_cache=None, # Lazy
+                uncertainty_lambda=self.uncertainty_lambda,
+                use_surprise_reward=self.use_surprise_reward
             )
             node.children[int(a)] = child
                 
@@ -211,26 +503,26 @@ class AsyncDeliberationLoop:
             return torch.tensor([action], device=device)
     
     def backpropagate(self, node: MCTSNode, value: float, path: List[int]):
-        """Update statistics of visited nodes with Structural Verification"""
+        """Update statistics of visited nodes with Structural & Objective Verification"""
         
-        # Operational Verification: Check if this path completes an invalid grid
-        # Tokens: 13=ROW_END, 14=GRID_END, 16-45=Rows, 46-75=Cols
-        if path and path[-1] == 14:
-            # We check the structure of the path
-            rows_header = -1
-            cols_header = -1
-            row_count = 0
+        # 1. Objective Verification (DTR / CTA)
+        if self.path_evaluator is not None:
+            external_reward = self.path_evaluator(path)
             
-            # Find headers in the path (very simplified check)
-            for t in path:
-                if 16 <= t <= 45: rows_header = t - 15
-                if 46 <= t <= 75: cols_header = t - 45
-                if t == 13: row_count += 1
+            # Store in leaf node for immediate value property influence
+            node.external_reward = external_reward
             
-            if rows_header > 0 and row_count != rows_header:
-                # Structural Failure: Wrong number of rows
+            if external_reward == 0.0:
+                # INVALID STRUCTURE: Force value to 0.0 (Strict pruning)
                 value = [0.0] * len(value) if isinstance(value, list) else 0.0
+            elif external_reward is not None:
+                # Blend internal value with external reward
+                if isinstance(value, list):
+                    value = [(v + external_reward) / 2.0 for v in value]
+                else:
+                    value = (value + external_reward) / 2.0
 
+        # Update node statistics up the tree
         cur = node
         while cur is not None:
             cur.visit_count += 1
@@ -245,7 +537,14 @@ class AsyncDeliberationLoop:
             
     def deliberate_sync(self, seq: Optional[torch.Tensor], state: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor], float]:
         """Blocking MCTS deliberation process."""
+        # Save sequence for full path reconstruction during MCTS
+        if seq is not None:
+            self._current_seq_list = seq[0].tolist() if seq.dim() > 1 else seq.tolist()
+        else:
+            self._current_seq_list = []
+            
         # Prepare root state
+
         if state is not None:
             if isinstance(state, torch.Tensor):
                 if state.dim() == 1:
@@ -271,7 +570,15 @@ class AsyncDeliberationLoop:
             root_state = torch.tensor([], device=next(self.model.parameters()).device)
 
         # Root node always has the state cached
-        root = MCTSNode(prior_p=1.0, children={}, parent=None, action=None, state_cache=root_state)
+        root = MCTSNode(
+            prior_p=1.0, 
+            children={}, 
+            parent=None, 
+            action=None, 
+            state_cache=root_state,
+            uncertainty_lambda=self.uncertainty_lambda,
+            use_surprise_reward=self.use_surprise_reward
+        )
 
         # Initial expansion
         use_latent = state is not None
@@ -286,7 +593,7 @@ class AsyncDeliberationLoop:
         # values is list of tensors, convert to list of floats
         value_list = [v.item() for v in values]
         
-        self.expand_node(root, last_logits, value_list)
+        self.expand_node(root, last_logits, value_list, [])
 
         # Run simulations
         for _ in range(self.n_simulations):
@@ -304,7 +611,7 @@ class AsyncDeliberationLoop:
                 last_logits = logits[0, -1]
                 value_list = [v.item() for v in values]
                 
-                self.expand_node(leaf, last_logits, value_list)
+                self.expand_node(leaf, last_logits, value_list, path)
                 rollout_value = value_list
             else:
                 rollout_value = self._rollout_value(leaf_state)

@@ -5,6 +5,7 @@ import asyncio
 from torch.utils.data import DataLoader
 from .base import BaseTask
 from ..data.datasets import ARCDataset
+from ..training.logger import logger
 
 class ARCTask(BaseTask):
     """
@@ -86,7 +87,7 @@ class ARCTask(BaseTask):
             
         return total_loss
 
-    async def evaluate_async(self, model, device):
+    async def evaluate_async(self, model, device, max_samples=None):
         """
         Full ARC evaluation with detailed diagnostic metrics.
         """
@@ -111,6 +112,9 @@ class ARCTask(BaseTask):
 
         with torch.no_grad():
             for x, y, split_idx in loader:
+                if max_samples is not None and results["total"] >= max_samples:
+                    break
+                    
                 results["total"] += 1
                 if results["total"] % 10 == 0:
                     logger.info(f"  Evaluating sample {results['total']}...")
@@ -131,7 +135,14 @@ class ARCTask(BaseTask):
                 else:
                     output_ids = self._greedy_generate(model, x_in, max_len=len(target_tokens) + 10)
                 
-                pred_tokens = output_ids[split_idx:].tolist()
+                if len(output_ids) > split_idx:
+                    pred_tokens = output_ids[split_idx:].tolist()
+                    # If model generated [OUTPUT_START] (12) again, skip it
+                    if pred_tokens and pred_tokens[0] == 12:
+                        pred_tokens = pred_tokens[1:]
+                else:
+                    pred_tokens = []
+                
                 # Remove padding/trailing zeros
                 pred_tokens = [t for t in pred_tokens if t != 0]
                 
@@ -158,8 +169,6 @@ class ARCTask(BaseTask):
                     # Didn't even reach GRID_END
                     pass 
 
-                results["total"] += 1
-                
         total = results["total"]
         if total > 0:
             results["accuracy"] = correct / total
@@ -231,4 +240,4 @@ class ARCTask(BaseTask):
         p = [t for t in pred if t != 0]
         t = [t for t in target if t != 0]
         if not p or not t: return False
-        return p[:len(t)] == t
+        return p == t
